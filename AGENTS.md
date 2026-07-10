@@ -14,11 +14,11 @@ services/
   payment/               # thanh toán       (http://localhost:5004)
 ```
 
-Mỗi service: một `.csproj` (`Microsoft.NET.Sdk.Web`, `net10.0`) + `Program.cs` + `Properties/launchSettings.json` riêng. ASP.NET Core minimal API.
+Mỗi service: một `.csproj` (`Microsoft.NET.Sdk.Web`, `net10.0`) + `Program.cs` riêng. ASP.NET Core minimal API. **Catalog/Cart KHÔNG có `Properties/launchSettings.json`** (đã gỡ để env là nguồn cổng duy nhất — xem mục Config); order/payment vẫn còn `launchSettings.json`.
 
 **Casing có chủ đích:** `Catalog`/`Cart` dùng PascalCase (thư mục, `.csproj`, namespace đều khớp `Catalog`/`Cart`) vì đã có `Config.cs` với `namespace Catalog;` / `namespace Cart;`. `order`/`payment` chưa được nâng cấp lên pattern này — đừng tự ý đổi tên chúng khi không có yêu cầu, và đừng "sửa cho đồng bộ" nếu task không nhắc tới.
 
-**Config từ env (chỉ Catalog, Cart hiện tại):** đọc `PORT` và `SERVICE_NAME` qua `Config.Load(defaultPort, defaultName)` trong `Config.cs` của từng service — mỗi service tự định nghĩa `ServiceConfig`/`Config` của riêng mình (namespace khác nhau), KHÔNG factor ra project dùng chung. `PORT` không parse được thành số → ném lỗi ngay khi khởi động, không âm thầm fallback.
+**Config từ env (chỉ Catalog, Cart hiện tại):** đọc `PORT` và `SERVICE_NAME` qua `Config.Load(defaultPort, defaultName)` trong `Config.cs` của từng service — mỗi service tự định nghĩa `ServiceConfig`/`Config` của riêng mình (namespace khác nhau), KHÔNG factor ra project dùng chung. `Program.cs` nối `config.Port` vào `builder.WebHost.UseUrls(...)` và `config.ServiceName` vào cả log khởi động lẫn `/health`. `PORT` không parse được thành số → ném `InvalidOperationException` ngay khi khởi động, không âm thầm fallback. **Không thêm lại `launchSettings.json` với `applicationUrl` cứng cho Catalog/Cart** — nó đặt `ASPNETCORE_URLS` và làm mờ bằng chứng env-điều-khiển-cổng.
 
 ## Luật ranh giới (bất khả xâm phạm)
 

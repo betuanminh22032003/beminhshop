@@ -28,6 +28,27 @@ Mỗi service là một `.csproj` độc lập — build và chạy riêng, khô
 
 Catalog và Cart đọc `PORT` và `SERVICE_NAME` từ environment qua helper `Config.Load(defaultPort, defaultName)` (`services/Catalog/Config.cs`, `services/Cart/Config.cs`) — mỗi service có mặc định riêng (Catalog: port 5001 / tên "catalog"; Cart: port 5002 / tên "cart"). `PORT` không hợp lệ (không parse được thành số) sẽ ném `InvalidOperationException` ngay khi khởi động thay vì âm thầm dùng sai cổng.
 
+Entrypoint mỗi service (`Program.cs`) nối config vào runtime — `config.Port` đi vào `UseUrls`, `config.ServiceName` đi vào cả log khởi động lẫn payload `/health`:
+
+```csharp
+// services/Catalog/Program.cs  (Cart giống hệt, khác default port/name và endpoint)
+using Catalog;
+
+var config = Config.Load(defaultPort: 5001, defaultName: "catalog");   // đọc PORT/SERVICE_NAME từ env
+
+var builder = WebApplication.CreateBuilder(args);
+builder.WebHost.UseUrls($"http://localhost:{config.Port}");            // <-- config.Port điều khiển cổng bind
+var app = builder.Build();
+
+app.MapGet("/health", () => new { service = config.ServiceName, status = "ok" });  // <-- config.ServiceName
+app.MapGet("/products", () => new[] { new { id = "sku-1", title = "Starter Mug", priceCents = 1200 } });
+
+Console.WriteLine($"[{config.ServiceName}] listening on :{config.Port}");           // <-- log khởi động
+app.Run();
+```
+
+> Không dùng `Properties/launchSettings.json` cho Catalog/Cart: đã gỡ bỏ để env là **nguồn chân lý duy nhất** cho cổng. `launchSettings` đặt `applicationUrl` cứng (qua `ASPNETCORE_URLS`) sẽ che mất việc `config.Port` mới là thứ bind cổng. (order/payment vẫn giữ `launchSettings` vì chưa lên pattern này.)
+
 ## Build
 
 Từ gốc repo:
@@ -75,24 +96,74 @@ Build succeeded.
 ## Chạy từng service độc lập
 
 ```bash
-PORT=5001 dotnet run --project services/Catalog   # http://localhost:5001/health
-PORT=5002 dotnet run --project services/Cart      # http://localhost:5002/health
-dotnet run --project services/order               # http://localhost:5003/health
-dotnet run --project services/payment             # http://localhost:5004/health
+dotnet run --project services/Catalog                 # mặc định :5001
+PORT=8080 dotnet run --project services/Catalog        # override cổng qua env
+PORT=5002 dotnet run --project services/Cart           # mặc định :5002
 ```
 
-Đã chạy thật cả Catalog (PORT=5001) và Cart (PORT=5002) song song, mỗi service in một dòng log khởi động và trả lời health check:
+## Kiểm chứng (transcript thật, .NET SDK 10.0.301)
+
+Tất cả output dưới đây được chạy thật và dán nguyên văn.
+
+### 1. Build cô lập — build một service KHÔNG build service kia
 
 ```
+$ dotnet build-server shutdown && rm -rf services/*/bin services/*/obj
+$ dotnet build services/Catalog
+  Determining projects to restore...
+  Restored E:\code\PetProject\services\Catalog\Catalog.csproj (in 67 ms).
+  Catalog -> E:\code\PetProject\services\Catalog\bin\Debug\net10.0\Catalog.dll
+  Build succeeded.  0 Warning(s)  0 Error(s)
+
+$ ls services/Cart/bin
+ls: cannot access 'services/Cart/bin': No such file or directory   # Cart CHƯA hề được biên dịch
+```
+
+### 2. Env điều khiển cổng + tên (Catalog)
+
+`config.Port` → `UseUrls`, `config.ServiceName` → log & `/health`:
+
+```
+# (a) không set env -> default 5001 / "catalog"
+$ dotnet run --project services/Catalog
 [catalog] listening on :5001
-...
-GET http://localhost:5001/health -> {"service":"catalog","status":"ok"}
-GET http://localhost:5001/products -> [{"id":"sku-1","title":"Starter Mug","priceCents":1200}]
+      Now listening on: http://localhost:5001
+$ curl :5001/health   -> {"service":"catalog","status":"ok"}
+$ curl :5001/products -> [{"id":"sku-1","title":"Starter Mug","priceCents":1200}]
 
+# (b) PORT=6100 SERVICE_NAME=catalog-probe -> env thắng
+$ PORT=6100 SERVICE_NAME=catalog-probe dotnet run --project services/Catalog
+[catalog-probe] listening on :6100
+      Now listening on: http://localhost:6100
+$ curl :6100/health -> {"service":"catalog-probe","status":"ok"}   # cổng & tên đều từ env
+$ curl :5001/health -> (connection refused)                        # default 5001 KHÔNG bind
+```
+
+### 3. Env điều khiển cổng + tên (Cart)
+
+```
+# (a) default 5002 / "cart"
+$ dotnet run --project services/Cart
 [cart] listening on :5002
-...
-GET http://localhost:5002/health -> {"service":"cart","status":"ok"}
-POST http://localhost:5002/cart/items {"sku":"sku-1","qty":2} -> {"items":[{"sku":"sku-1","qty":2}]}
+$ curl :5002/health -> {"service":"cart","status":"ok"}
+$ curl -X POST :5002/cart/items -d '{"sku":"sku-1","qty":2}' -> {"items":[{"sku":"sku-1","qty":2}]}
+
+# (b) PORT=6200 SERVICE_NAME=cart-probe -> env thắng
+$ PORT=6200 SERVICE_NAME=cart-probe dotnet run --project services/Cart
+[cart-probe] listening on :6200
+$ curl :6200/health -> {"service":"cart-probe","status":"ok"}
+$ curl :5002/health -> (connection refused)   # default 5002 KHÔNG bind
+```
+
+### 4. PORT không hợp lệ -> ném lỗi ngay, server KHÔNG khởi động
+
+```
+$ PORT=abc dotnet run --project services/Catalog
+Unhandled exception. System.InvalidOperationException: Invalid PORT="abc": expected a number
+$ echo $?   -> khác 0 (process thoát lỗi, chưa từng lắng nghe)
+
+$ PORT=xyz dotnet run --project services/Cart
+Unhandled exception. System.InvalidOperationException: Invalid PORT="xyz": expected a number
 ```
 
 ## Luật ranh giới
