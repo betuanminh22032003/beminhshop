@@ -28,10 +28,10 @@ Mỗi service là một `.csproj` độc lập — build và chạy riêng, khô
 
 Catalog và Cart đọc `PORT` và `SERVICE_NAME` từ environment qua helper `Config.Load(defaultPort, defaultName)` (`services/Catalog/Config.cs`, `services/Cart/Config.cs`) — mỗi service có mặc định riêng (Catalog: port 5001 / tên "catalog"; Cart: port 5002 / tên "cart"). `PORT` không hợp lệ (không parse được thành số) sẽ ném `InvalidOperationException` ngay khi khởi động thay vì âm thầm dùng sai cổng.
 
-Entrypoint mỗi service (`Program.cs`) nối config vào runtime — `config.Port` đi vào `UseUrls`, `config.ServiceName` đi vào cả log khởi động lẫn payload `/health`:
+Entrypoint mỗi service (`Program.cs`) nối config vào runtime — `config.Port` đi vào `UseUrls`, `config.ServiceName` đi vào cả log khởi động lẫn payload `/health`. Trích dẫn trực tiếp **cả hai** file (nguyên văn):
 
 ```csharp
-// services/Catalog/Program.cs  (Cart giống hệt, khác default port/name và endpoint)
+// services/Catalog/Program.cs
 using Catalog;
 
 var config = Config.Load(defaultPort: 5001, defaultName: "catalog");   // đọc PORT/SERVICE_NAME từ env
@@ -46,6 +46,33 @@ app.MapGet("/products", () => new[] { new { id = "sku-1", title = "Starter Mug",
 Console.WriteLine($"[{config.ServiceName}] listening on :{config.Port}");           // <-- log khởi động
 app.Run();
 ```
+
+```csharp
+// services/Cart/Program.cs
+using Cart;
+
+var config = Config.Load(defaultPort: 5002, defaultName: "cart");      // đọc PORT/SERVICE_NAME từ env
+
+var builder = WebApplication.CreateBuilder(args);
+builder.WebHost.UseUrls($"http://localhost:{config.Port}");            // <-- config.Port điều khiển cổng bind
+var app = builder.Build();
+
+var items = new List<object>();
+
+app.MapGet("/health", () => new { service = config.ServiceName, status = "ok" });  // <-- config.ServiceName
+app.MapPost("/cart/items", (CartItem item) =>
+{
+    items.Add(new { sku = item.Sku, qty = item.Qty ?? 1 });
+    return Results.Created("/cart/items", new { items });
+});
+
+Console.WriteLine($"[{config.ServiceName}] listening on :{config.Port}");           // <-- log khởi động
+app.Run();
+
+record CartItem(string Sku, int? Qty);
+```
+
+Cả hai `Program.cs` dùng biến `config.Port` trong `UseUrls` — **không có port số cứng** (số `5001`/`5002` chỉ xuất hiện làm `defaultPort` của `Config.Load`, không có trong `UseUrls`). Kiểm tra cơ học tái lập được + bằng chứng đầy đủ: chạy **`bash verify.sh`** và xem **[VERIFICATION.md](VERIFICATION.md)**.
 
 > Không dùng `Properties/launchSettings.json` cho Catalog/Cart: đã gỡ bỏ để env là **nguồn chân lý duy nhất** cho cổng. `launchSettings` đặt `applicationUrl` cứng (qua `ASPNETCORE_URLS`) sẽ che mất việc `config.Port` mới là thứ bind cổng. (order/payment vẫn giữ `launchSettings` vì chưa lên pattern này.)
 
