@@ -1,7 +1,7 @@
 <Solution>
   <Folder Name="/services/">
-    <Project Path="services/cart/cart.csproj" />
-    <Project Path="services/catalog/catalog.csproj" />
+    <Project Path="services/Cart/Cart.csproj" />
+    <Project Path="services/Catalog/Catalog.csproj" />
     <Project Path="services/order/order.csproj" />
     <Project Path="services/payment/payment.csproj" />
   </Folder>
