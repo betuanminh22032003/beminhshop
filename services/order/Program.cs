@@ -3,6 +3,7 @@
 var builder = WebApplication.CreateBuilder(args);
 var app = builder.Build();
 
-app.MapGet("/health", () => Results.Ok(new { service = "order", status = "ok" }));
+// Liveness probe: không xác thực, không tác dụng phụ, đăng ký trước UseAuthentication (nếu milestone sau thêm auth).
+app.MapGet("/health", () => Results.Ok(HealthResponse.Ok("order")));
 
 app.Run();

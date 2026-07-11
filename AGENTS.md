@@ -22,7 +22,7 @@ Mỗi service: một `.csproj` (`Microsoft.NET.Sdk.Web`, `net10.0`) + `Program.c
 
 ## Luật ranh giới (bất khả xâm phạm)
 
-1. **Không tạo project "logic dùng chung".** Không `Shared`, `Common`, `Core`, `Libs` chứa business logic. Nếu hai service cần cùng một khái niệm, mỗi service tự định nghĩa phiên bản của mình.
+1. **Không tạo project "logic dùng chung".** Không `Shared`, `Common`, `Core`, `Libs` chứa business logic. Nếu hai service cần cùng một khái niệm, mỗi service tự định nghĩa phiên bản của mình. Ví dụ đang áp dụng: `HealthResponse` (record cho `GET /health`) — **4 file riêng** `services/<tên>/HealthResponse.cs`, nội dung giống nhau nhưng không project nào tham chiếu project khác. Khi cám dỗ "gom cho gọn", nhớ: đây chính là lằn ranh rule này bảo vệ.
 2. **Service không `ProjectReference` sang service khác.** Không có tham chiếu project nào từ `services/A` sang `services/B`. Giao tiếp giữa service (khi milestone sau cần) đi qua HTTP API, không qua reference.
 3. **Mỗi service build và chạy độc lập.** `dotnet build services/<tên>/<tên>.csproj` phải thành công mà không cần build service nào khác trước.
 4. **Mỗi service sở hữu dữ liệu của nó.** Không đọc/ghi chéo dữ liệu. Chi tiết trách nhiệm từng service: [README.md](README.md).

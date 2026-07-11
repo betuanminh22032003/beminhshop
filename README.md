@@ -12,13 +12,19 @@ Monorepo .NET, mỗi service là một project độc lập trong một solution
 ```
 starci-shop.slnx              # solution gốc, tham chiếu 4 project service
 services/
-  Catalog/  Catalog.csproj  Program.cs  Config.cs
-  Cart/     Cart.csproj     Program.cs  Config.cs
-  order/    order.csproj    Program.cs
-  payment/  payment.csproj  Program.cs
+  Catalog/  Catalog.csproj  Program.cs  Config.cs  HealthResponse.cs
+  Cart/     Cart.csproj     Program.cs  Config.cs  HealthResponse.cs
+  order/    order.csproj    Program.cs             HealthResponse.cs
+  payment/  payment.csproj  Program.cs             HealthResponse.cs
 ```
 
 Mỗi service một `.csproj` riêng (`Microsoft.NET.Sdk.Web`, `net10.0`), build và chạy độc lập, không `ProjectReference` chéo.
+
+## GET /health — đồng nhất trên cả 4 service, không có project dùng chung
+
+Cả 4 service trả cùng shape JSON (`{"service":"<tên>","status":"ok"}`) qua một record `HealthResponse` với factory `Ok(service)`. Điểm quan trọng: **mỗi service tự khai báo bản `HealthResponse.cs` của riêng mình** (4 file giống hệt nhau về nội dung, khác namespace/không namespace) — **không** có một project `Shared` chứa record dùng chung. Đây là cách đúng để có "response shape đồng nhất" trong kiến trúc microservice: chia sẻ **contract** (shape của response), không chia sẻ **code biên dịch** — nếu có một project `Shared` được `ProjectReference` bởi cả 4 service, sửa `HealthResponse` sẽ buộc build lại tất cả, vi phạm "mỗi service build/deploy độc lập" (luật ranh giới #1–#3 trong `AGENTS.md`).
+
+`/health` không xác thực (không có middleware auth trong repo hiện tại) và được map trước bất kỳ điểm nghiệp vụ nào — comment tại chỗ map nhắc milestone sau (khi có `UseAuthentication`) phải giữ thứ tự này hoặc `.AllowAnonymous()`.
 
 ## Lệnh
 
@@ -51,11 +57,12 @@ Toàn bộ nội dung thực, kèm số dòng, của các file quyết định �
  8  builder.WebHost.UseUrls($"http://localhost:{config.Port}");
  9  var app = builder.Build();
 10
-11  app.MapGet("/health", () => new { service = config.ServiceName, status = "ok" });
-12  app.MapGet("/products", () => new[] { new { id = "sku-1", title = "Starter Mug", priceCents = 1200 } });
-13
-14  Console.WriteLine($"[{config.ServiceName}] listening on :{config.Port}");
-15  app.Run();
+11  // Liveness probe: không xác thực, không tác dụng phụ, đăng ký trước UseAuthentication (nếu milestone sau thêm auth).
+12  app.MapGet("/health", () => Results.Ok(HealthResponse.Ok(config.ServiceName)));
+13  app.MapGet("/products", () => new[] { new { id = "sku-1", title = "Starter Mug", priceCents = 1200 } });
+14
+15  Console.WriteLine($"[{config.ServiceName}] listening on :{config.Port}");
+16  app.Run();
 ```
 
 ### `services/Cart/Program.cs`
@@ -73,18 +80,71 @@ Toàn bộ nội dung thực, kèm số dòng, của các file quyết định �
 10
 11  var items = new List<object>();
 12
-13  app.MapGet("/health", () => new { service = config.ServiceName, status = "ok" });
-14  app.MapPost("/cart/items", (CartItem item) =>
-15  {
-16      items.Add(new { sku = item.Sku, qty = item.Qty ?? 1 });
-17      return Results.Created("/cart/items", new { items });
-18  });
-19
-20  Console.WriteLine($"[{config.ServiceName}] listening on :{config.Port}");
-21  app.Run();
-22
-23  record CartItem(string Sku, int? Qty);
+13  // Liveness probe: không xác thực, không tác dụng phụ, đăng ký trước UseAuthentication (nếu milestone sau thêm auth).
+14  app.MapGet("/health", () => Results.Ok(HealthResponse.Ok(config.ServiceName)));
+15  app.MapPost("/cart/items", (CartItem item) =>
+16  {
+17      items.Add(new { sku = item.Sku, qty = item.Qty ?? 1 });
+18      return Results.Created("/cart/items", new { items });
+19  });
+20
+21  Console.WriteLine($"[{config.ServiceName}] listening on :{config.Port}");
+22  app.Run();
+23
+24  record CartItem(string Sku, int? Qty);
 ```
+
+### `services/Catalog/HealthResponse.cs`
+
+```csharp
+1  namespace Catalog;
+2
+3  public record HealthResponse(string Service, string Status)
+4  {
+5      public static HealthResponse Ok(string service) => new(service, "ok");
+6  }
+```
+
+### `services/Cart/HealthResponse.cs`
+
+```csharp
+1  namespace Cart;
+2
+3  public record HealthResponse(string Service, string Status)
+4  {
+5      public static HealthResponse Ok(string service) => new(service, "ok");
+6  }
+```
+
+### `services/order/Program.cs`
+
+```csharp
+1  // order: sở hữu việc biến giỏ hàng thành đơn đã đặt và theo dõi vòng đời của đơn.
+2  // KHÔNG thu tiền thẻ.
+3  var builder = WebApplication.CreateBuilder(args);
+4  var app = builder.Build();
+5
+6  // Liveness probe: không xác thực, không tác dụng phụ, đăng ký trước UseAuthentication (nếu milestone sau thêm auth).
+7  app.MapGet("/health", () => Results.Ok(HealthResponse.Ok("order")));
+8
+9  app.Run();
+```
+
+### `services/payment/Program.cs`
+
+```csharp
+1  // payment: sở hữu việc thu tiền cho một đơn và ghi lại kết quả thanh toán.
+2  // KHÔNG quản lý sản phẩm hay giỏ hàng.
+3  var builder = WebApplication.CreateBuilder(args);
+4  var app = builder.Build();
+5
+6  // Liveness probe: không xác thực, không tác dụng phụ, đăng ký trước UseAuthentication (nếu milestone sau thêm auth).
+7  app.MapGet("/health", () => Results.Ok(HealthResponse.Ok("payment")));
+8
+9  app.Run();
+```
+
+`services/order/HealthResponse.cs` và `services/payment/HealthResponse.cs` có nội dung giống Catalog/Cart nhưng **không có dòng `namespace`** (order/payment chưa dùng namespace riêng ở milestone này — xem ghi chú casing bên dưới).
 
 ### `services/Catalog/Config.cs`
 
@@ -174,12 +234,12 @@ Toàn bộ nội dung thực, kèm số dòng, của các file quyết định �
 | Tiêu chí | Catalog | Cart |
 | --- | --- | --- |
 | Entrypoint riêng, boot trên port riêng | `Program.cs` | `Program.cs` |
-| Dòng log khởi động | `Program.cs:14` | `Program.cs:20` |
+| Dòng log khởi động | `Program.cs:15` | `Program.cs:21` |
 | Gọi `Config.Load(...)` với default riêng | `Program.cs:5` (`5001`/`catalog`) | `Program.cs:5` (`5002`/`cart`) |
 | Đọc `PORT` qua `Environment.GetEnvironmentVariable` | `Config.cs:9` | `Config.cs:9` |
 | Đọc `SERVICE_NAME` qua `Environment.GetEnvironmentVariable` | `Config.cs:13` | `Config.cs:13` |
 | `config.Port` → `UseUrls` (không literal cứng) | `Program.cs:8` | `Program.cs:8` |
-| `config.ServiceName` → log & `/health` | `Program.cs:14`, `11` | `Program.cs:20`, `13` |
+| `config.ServiceName` → log & `/health` | `Program.cs:15`, `12` | `Program.cs:21`, `14` |
 | Ném lỗi khi PORT malformed | `Config.cs:11-12` | `Config.cs:11-12` |
 | Default khi thiếu PORT (giữ `defaultPort`) | `Config.cs:10` + short-circuit `:11` | `Config.cs:10` + `:11` |
 | Default khi thiếu SERVICE_NAME (`?? defaultName`) | `Config.cs:13` | `Config.cs:13` |
@@ -187,5 +247,28 @@ Toàn bộ nội dung thực, kèm số dòng, của các file quyết định �
 | `.csproj` riêng, `Sdk.Web` + `net10.0` | `Catalog.csproj:1,4` | `Cart.csproj:1,4` |
 | Không `ProjectReference` chéo | không có trong `Catalog.csproj` | không có trong `Cart.csproj` |
 | Solution tham chiếu project riêng | `starci-shop.slnx:4` | `starci-shop.slnx:3` |
+| `GET /health` dùng record `HealthResponse.Ok(...)` (không project chung) | `Program.cs:12`, `HealthResponse.cs` riêng | `Program.cs:14`, `HealthResponse.cs` riêng |
+| `/health` cùng shape trên cả 4 service | `{"service":"catalog","status":"ok"}` | `{"service":"cart","status":"ok"}` (order/payment tương tự, xem transcript) |
 
 Số `5001`/`5002` chỉ xuất hiện tại `Program.cs:5` (tham số `defaultPort`), **không** trong `UseUrls` (`Program.cs:8` chỉ dùng biến `{config.Port}`).
+
+## Transcript chạy thật — /health trên cả 4 service, kill Cart không ảnh hưởng service khác
+
+```
+$ dotnet run --project services/Catalog & dotnet run --project services/Cart & \
+  dotnet run --project services/order & dotnet run --project services/payment &
+
+$ curl :5001/health -> {"service":"catalog","status":"ok"}
+$ curl :5002/health -> {"service":"cart","status":"ok"}
+$ curl :5003/health -> {"service":"order","status":"ok"}
+$ curl :5004/health -> {"service":"payment","status":"ok"}
+
+$ kill <PID của Cart>   # chỉ Cart
+
+$ curl :5002/health -> curl: (7) Failed to connect to localhost:5002 ... Could not connect to server
+$ curl :5001/health -> {"service":"catalog","status":"ok"}   # vẫn sống
+$ curl :5003/health -> {"service":"order","status":"ok"}     # vẫn sống
+$ curl :5004/health -> {"service":"payment","status":"ok"}   # vẫn sống
+```
+
+Kill một service không ảnh hưởng ba service kia — mỗi service chạy trong process hệ điều hành riêng, độc lập hoàn toàn.
