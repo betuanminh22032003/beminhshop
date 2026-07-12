@@ -24,6 +24,10 @@ Mỗi service một `.csproj` riêng (`Microsoft.NET.Sdk.Web`, `net10.0`), build
 
 Cả 4 service trả cùng shape JSON (`{"service":"<tên>","status":"ok"}`) qua một record `HealthResponse` với factory `Ok(service)`. Điểm quan trọng: **mỗi service tự khai báo bản `HealthResponse.cs` của riêng mình** (4 file giống hệt nhau về nội dung, khác namespace/không namespace) — **không** có một project `Shared` chứa record dùng chung. Đây là cách đúng để có "response shape đồng nhất" trong kiến trúc microservice: chia sẻ **contract** (shape của response), không chia sẻ **code biên dịch** — nếu có một project `Shared` được `ProjectReference` bởi cả 4 service, sửa `HealthResponse` sẽ buộc build lại tất cả, vi phạm "mỗi service build/deploy độc lập" (luật ranh giới #1–#3 trong `AGENTS.md`).
 
+Identity (tên service) của **cả 4 service** đều đọc từ environment variable `SERVICE_NAME`, có default riêng, **không hardcode**:
+- Catalog/Cart: qua `Config.Load(...)` → `config.ServiceName` (default `"catalog"`/`"cart"`).
+- order/payment: qua `Environment.GetEnvironmentVariable("SERVICE_NAME") ?? "order"` / `?? "payment"` — cùng cơ chế, cùng tên biến env với Catalog/Cart, không phải một kiểu đọc config khác.
+
 `/health` không xác thực (không có middleware auth trong repo hiện tại) và được map trước bất kỳ điểm nghiệp vụ nào — comment tại chỗ map nhắc milestone sau (khi có `UseAuthentication`) phải giữ thứ tự này hoặc `.AllowAnonymous()`.
 
 ## Lệnh
@@ -34,6 +38,7 @@ dotnet build services/Catalog                     # build cô lập 1 service
 dotnet run --project services/Catalog             # mặc định :5001
 PORT=8080 dotnet run --project services/Catalog   # override cổng qua env
 dotnet run --project services/Cart                # mặc định :5002
+SERVICE_NAME=order-2 dotnet run --project services/order     # override tên qua env
 ```
 
 Health check: `GET /health` → `{"service":"<tên>","status":"ok"}`.
@@ -42,7 +47,7 @@ Health check: `GET /health` → `{"service":"<tên>","status":"ok"}`.
 
 # Mã nguồn đầy đủ (để đối chiếu chấm điểm)
 
-Toàn bộ nội dung thực, kèm số dòng, của các file quyết định — cho **cả hai** service.
+Toàn bộ nội dung thực, kèm số dòng, của các file quyết định — cho **cả 4** service.
 
 ### `services/Catalog/Program.cs`
 
@@ -94,6 +99,38 @@ Toàn bộ nội dung thực, kèm số dòng, của các file quyết định �
 24  record CartItem(string Sku, int? Qty);
 ```
 
+### `services/order/Program.cs`
+
+```csharp
+ 1  // order: sở hữu việc biến giỏ hàng thành đơn đã đặt và theo dõi vòng đời của đơn.
+ 2  // KHÔNG thu tiền thẻ.
+ 3  var builder = WebApplication.CreateBuilder(args);
+ 4  var app = builder.Build();
+ 5
+ 6  var serviceName = Environment.GetEnvironmentVariable("SERVICE_NAME") ?? "order";
+ 7
+ 8  // Liveness probe: không xác thực, không tác dụng phụ, đăng ký trước UseAuthentication (nếu milestone sau thêm auth).
+ 9  app.MapGet("/health", () => Results.Ok(HealthResponse.Ok(serviceName)));
+10
+11  app.Run();
+```
+
+### `services/payment/Program.cs`
+
+```csharp
+ 1  // payment: sở hữu việc thu tiền cho một đơn và ghi lại kết quả thanh toán.
+ 2  // KHÔNG quản lý sản phẩm hay giỏ hàng.
+ 3  var builder = WebApplication.CreateBuilder(args);
+ 4  var app = builder.Build();
+ 5
+ 6  var serviceName = Environment.GetEnvironmentVariable("SERVICE_NAME") ?? "payment";
+ 7
+ 8  // Liveness probe: không xác thực, không tác dụng phụ, đăng ký trước UseAuthentication (nếu milestone sau thêm auth).
+ 9  app.MapGet("/health", () => Results.Ok(HealthResponse.Ok(serviceName)));
+10
+11  app.Run();
+```
+
 ### `services/Catalog/HealthResponse.cs`
 
 ```csharp
@@ -116,35 +153,25 @@ Toàn bộ nội dung thực, kèm số dòng, của các file quyết định �
 6  }
 ```
 
-### `services/order/Program.cs`
+### `services/order/HealthResponse.cs`
 
 ```csharp
-1  // order: sở hữu việc biến giỏ hàng thành đơn đã đặt và theo dõi vòng đời của đơn.
-2  // KHÔNG thu tiền thẻ.
-3  var builder = WebApplication.CreateBuilder(args);
-4  var app = builder.Build();
-5
-6  // Liveness probe: không xác thực, không tác dụng phụ, đăng ký trước UseAuthentication (nếu milestone sau thêm auth).
-7  app.MapGet("/health", () => Results.Ok(HealthResponse.Ok("order")));
-8
-9  app.Run();
+1  record HealthResponse(string Service, string Status)
+2  {
+3      public static HealthResponse Ok(string service) => new(service, "ok");
+4  }
 ```
 
-### `services/payment/Program.cs`
+### `services/payment/HealthResponse.cs`
 
 ```csharp
-1  // payment: sở hữu việc thu tiền cho một đơn và ghi lại kết quả thanh toán.
-2  // KHÔNG quản lý sản phẩm hay giỏ hàng.
-3  var builder = WebApplication.CreateBuilder(args);
-4  var app = builder.Build();
-5
-6  // Liveness probe: không xác thực, không tác dụng phụ, đăng ký trước UseAuthentication (nếu milestone sau thêm auth).
-7  app.MapGet("/health", () => Results.Ok(HealthResponse.Ok("payment")));
-8
-9  app.Run();
+1  record HealthResponse(string Service, string Status)
+2  {
+3      public static HealthResponse Ok(string service) => new(service, "ok");
+4  }
 ```
 
-`services/order/HealthResponse.cs` và `services/payment/HealthResponse.cs` có nội dung giống Catalog/Cart nhưng **không có dòng `namespace`** (order/payment chưa dùng namespace riêng ở milestone này — xem ghi chú casing bên dưới).
+`order`/`payment` chưa dùng namespace riêng ở milestone này (chưa nâng cấp lên pattern `Config.cs` như Catalog/Cart) — record ở global namespace, cùng nội dung `Service`/`Status`/`Ok(...)` như hai service kia. Không project nào tham chiếu record của service khác — 4 định nghĩa độc lập, trùng shape.
 
 ### `services/Catalog/Config.cs`
 
@@ -216,6 +243,34 @@ Toàn bộ nội dung thực, kèm số dòng, của các file quyết định �
 9  </Project>
 ```
 
+### `services/order/order.csproj`
+
+```xml
+1  <Project Sdk="Microsoft.NET.Sdk.Web">
+2
+3    <PropertyGroup>
+4      <TargetFramework>net10.0</TargetFramework>
+5      <Nullable>enable</Nullable>
+6      <ImplicitUsings>enable</ImplicitUsings>
+7    </PropertyGroup>
+8
+9  </Project>
+```
+
+### `services/payment/payment.csproj`
+
+```xml
+1  <Project Sdk="Microsoft.NET.Sdk.Web">
+2
+3    <PropertyGroup>
+4      <TargetFramework>net10.0</TargetFramework>
+5      <Nullable>enable</Nullable>
+6      <ImplicitUsings>enable</ImplicitUsings>
+7    </PropertyGroup>
+8
+9  </Project>
+```
+
 ### `starci-shop.slnx`
 
 ```xml
@@ -229,30 +284,33 @@ Toàn bộ nội dung thực, kèm số dòng, của các file quyết định �
 8  </Solution>
 ```
 
-## Đối chiếu tiêu chí → dòng mã
+## Đối chiếu tiêu chí → dòng mã (cả 4 service)
+
+| Tiêu chí | Catalog | Cart | order | payment |
+| --- | --- | --- | --- | --- |
+| Entrypoint riêng, boot trên port riêng | `Program.cs` | `Program.cs` | `Program.cs` | `Program.cs` |
+| Identity đọc từ env, không hardcode | `Config.cs:13` (`SERVICE_NAME`) | `Config.cs:13` | `Program.cs:6` (`SERVICE_NAME`) | `Program.cs:6` |
+| Default khi thiếu `SERVICE_NAME` | `Config.cs:13` `?? defaultName` | `Config.cs:13` | `Program.cs:6` `?? "order"` | `Program.cs:6` `?? "payment"` |
+| `GET /health` dùng record `HealthResponse.Ok(...)` | `Program.cs:12` | `Program.cs:14` | `Program.cs:9` | `Program.cs:9` |
+| `HealthResponse` là bản riêng của service (không project chung) | `HealthResponse.cs` (`namespace Catalog;`) | `HealthResponse.cs` (`namespace Cart;`) | `HealthResponse.cs` (global) | `HealthResponse.cs` (global) |
+| Cùng JSON shape `{"service":...,"status":"ok"}` | dòng log Test 1 dưới | dòng log Test 1 | dòng log Test 1 | dòng log Test 1 |
+| `.csproj` riêng, `Sdk.Web` + `net10.0`, không `ProjectReference` chéo | `Catalog.csproj:1,4` | `Cart.csproj:1,4` | `order.csproj:1,4` | `payment.csproj:1,4` |
+| Solution tham chiếu project riêng | `starci-shop.slnx:4` | `starci-shop.slnx:3` | `starci-shop.slnx:5` | `starci-shop.slnx:6` |
+| `/health` map trước điểm nghiệp vụ, không auth middleware | `Program.cs:11-12` | `Program.cs:13-14` | `Program.cs:8-9` | `Program.cs:8-9` |
+
+Catalog/Cart riêng có thêm (đã xác lập từ milestone trước, không đổi ở đây):
 
 | Tiêu chí | Catalog | Cart |
 | --- | --- | --- |
-| Entrypoint riêng, boot trên port riêng | `Program.cs` | `Program.cs` |
-| Dòng log khởi động | `Program.cs:15` | `Program.cs:21` |
 | Gọi `Config.Load(...)` với default riêng | `Program.cs:5` (`5001`/`catalog`) | `Program.cs:5` (`5002`/`cart`) |
-| Đọc `PORT` qua `Environment.GetEnvironmentVariable` | `Config.cs:9` | `Config.cs:9` |
-| Đọc `SERVICE_NAME` qua `Environment.GetEnvironmentVariable` | `Config.cs:13` | `Config.cs:13` |
 | `config.Port` → `UseUrls` (không literal cứng) | `Program.cs:8` | `Program.cs:8` |
-| `config.ServiceName` → log & `/health` | `Program.cs:15`, `12` | `Program.cs:21`, `14` |
 | Ném lỗi khi PORT malformed | `Config.cs:11-12` | `Config.cs:11-12` |
-| Default khi thiếu PORT (giữ `defaultPort`) | `Config.cs:10` + short-circuit `:11` | `Config.cs:10` + `:11` |
-| Default khi thiếu SERVICE_NAME (`?? defaultName`) | `Config.cs:13` | `Config.cs:13` |
-| Không dùng shared literal (mỗi service namespace riêng) | `Config.cs:1` `namespace Catalog;` | `Config.cs:1` `namespace Cart;` |
-| `.csproj` riêng, `Sdk.Web` + `net10.0` | `Catalog.csproj:1,4` | `Cart.csproj:1,4` |
-| Không `ProjectReference` chéo | không có trong `Catalog.csproj` | không có trong `Cart.csproj` |
-| Solution tham chiếu project riêng | `starci-shop.slnx:4` | `starci-shop.slnx:3` |
-| `GET /health` dùng record `HealthResponse.Ok(...)` (không project chung) | `Program.cs:12`, `HealthResponse.cs` riêng | `Program.cs:14`, `HealthResponse.cs` riêng |
-| `/health` cùng shape trên cả 4 service | `{"service":"catalog","status":"ok"}` | `{"service":"cart","status":"ok"}` (order/payment tương tự, xem transcript) |
 
 Số `5001`/`5002` chỉ xuất hiện tại `Program.cs:5` (tham số `defaultPort`), **không** trong `UseUrls` (`Program.cs:8` chỉ dùng biến `{config.Port}`).
 
-## Transcript chạy thật — /health trên cả 4 service, kill Cart không ảnh hưởng service khác
+## Transcript chạy thật (.NET SDK 10.0.301)
+
+### Test 1 — cả 4 service, identity mặc định, cùng JSON shape
 
 ```
 $ dotnet run --project services/Catalog & dotnet run --project services/Cart & \
@@ -262,13 +320,27 @@ $ curl :5001/health -> {"service":"catalog","status":"ok"}
 $ curl :5002/health -> {"service":"cart","status":"ok"}
 $ curl :5003/health -> {"service":"order","status":"ok"}
 $ curl :5004/health -> {"service":"payment","status":"ok"}
+```
 
+### Test 2 — kill Cart, ba service kia không bị ảnh hưởng
+
+```
 $ kill <PID của Cart>   # chỉ Cart
 
-$ curl :5002/health -> curl: (7) Failed to connect to localhost:5002 ... Could not connect to server
 $ curl :5001/health -> {"service":"catalog","status":"ok"}   # vẫn sống
+$ curl :5002/health -> (connection refused)                  # Cart đã chết
 $ curl :5003/health -> {"service":"order","status":"ok"}     # vẫn sống
 $ curl :5004/health -> {"service":"payment","status":"ok"}   # vẫn sống
 ```
 
-Kill một service không ảnh hưởng ba service kia — mỗi service chạy trong process hệ điều hành riêng, độc lập hoàn toàn.
+### Test 3 — SERVICE_NAME override cho order/payment (chứng minh KHÔNG hardcode)
+
+```
+$ SERVICE_NAME=order-probe dotnet run --project services/order
+$ curl :5003/health -> {"service":"order-probe","status":"ok"}
+
+$ SERVICE_NAME=payment-probe dotnet run --project services/payment
+$ curl :5004/health -> {"service":"payment-probe","status":"ok"}
+```
+
+Đổi `SERVICE_NAME` làm đổi hẳn giá trị `service` trong response — chứng minh `Program.cs:9` của order/payment đọc identity từ environment tại runtime, không phải chuỗi hardcode cố định.

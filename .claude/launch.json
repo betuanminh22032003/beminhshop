@@ -1,0 +1,29 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "catalog",
+      "runtimeExecutable": "dotnet",
+      "runtimeArgs": ["run", "--project", "services/Catalog"],
+      "port": 5001
+    },
+    {
+      "name": "cart",
+      "runtimeExecutable": "dotnet",
+      "runtimeArgs": ["run", "--project", "services/Cart"],
+      "port": 5002
+    },
+    {
+      "name": "order",
+      "runtimeExecutable": "dotnet",
+      "runtimeArgs": ["run", "--project", "services/order"],
+      "port": 5003
+    },
+    {
+      "name": "payment",
+      "runtimeExecutable": "dotnet",
+      "runtimeArgs": ["run", "--project", "services/payment"],
+      "port": 5004
+    }
+  ]
+}
