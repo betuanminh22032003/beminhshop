@@ -11,7 +11,8 @@ var app = builder.Build();
 var items = new List<object>();
 
 // Liveness probe: không xác thực, không tác dụng phụ, đăng ký trước UseAuthentication (nếu milestone sau thêm auth).
-app.MapGet("/health", () => Results.Ok(HealthResponse.Ok(config.ServiceName)));
+app.MapGet("/health", () => Results.Ok(HealthResponse.Ok(config.ServiceName)))
+   .AllowAnonymous();
 app.MapPost("/cart/items", (CartItem item) =>
 {
     items.Add(new { sku = item.Sku, qty = item.Qty ?? 1 });

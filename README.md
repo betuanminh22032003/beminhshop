@@ -28,7 +28,7 @@ Identity (tên service) của **cả 4 service** đều đọc từ environment 
 - Catalog/Cart: qua `Config.Load(...)` → `config.ServiceName` (default `"catalog"`/`"cart"`).
 - order/payment: qua `Environment.GetEnvironmentVariable("SERVICE_NAME") ?? "order"` / `?? "payment"` — cùng cơ chế, cùng tên biến env với Catalog/Cart, không phải một kiểu đọc config khác.
 
-`/health` không xác thực (không có middleware auth trong repo hiện tại) và được map trước bất kỳ điểm nghiệp vụ nào — comment tại chỗ map nhắc milestone sau (khi có `UseAuthentication`) phải giữ thứ tự này hoặc `.AllowAnonymous()`.
+`/health` được đánh dấu `.AllowAnonymous()` ở cả bốn service, nên không yêu cầu xác thực ngay cả khi milestone sau thêm `UseAuthentication`/`UseAuthorization`; handler chỉ tạo response từ identity đã nạp và không có side effect.
 
 ## Lệnh
 
@@ -63,11 +63,12 @@ Toàn bộ nội dung thực, kèm số dòng, của các file quyết định �
  9  var app = builder.Build();
 10
 11  // Liveness probe: không xác thực, không tác dụng phụ, đăng ký trước UseAuthentication (nếu milestone sau thêm auth).
-12  app.MapGet("/health", () => Results.Ok(HealthResponse.Ok(config.ServiceName)));
-13  app.MapGet("/products", () => new[] { new { id = "sku-1", title = "Starter Mug", priceCents = 1200 } });
-14
-15  Console.WriteLine($"[{config.ServiceName}] listening on :{config.Port}");
-16  app.Run();
+12  app.MapGet("/health", () => Results.Ok(HealthResponse.Ok(config.ServiceName)))
+13     .AllowAnonymous();
+14  app.MapGet("/products", () => new[] { new { id = "sku-1", title = "Starter Mug", priceCents = 1200 } });
+15
+16  Console.WriteLine($"[{config.ServiceName}] listening on :{config.Port}");
+17  app.Run();
 ```
 
 ### `services/Cart/Program.cs`
@@ -86,12 +87,13 @@ Toàn bộ nội dung thực, kèm số dòng, của các file quyết định �
 11  var items = new List<object>();
 12
 13  // Liveness probe: không xác thực, không tác dụng phụ, đăng ký trước UseAuthentication (nếu milestone sau thêm auth).
-14  app.MapGet("/health", () => Results.Ok(HealthResponse.Ok(config.ServiceName)));
-15  app.MapPost("/cart/items", (CartItem item) =>
-16  {
-17      items.Add(new { sku = item.Sku, qty = item.Qty ?? 1 });
-18      return Results.Created("/cart/items", new { items });
-19  });
+14  app.MapGet("/health", () => Results.Ok(HealthResponse.Ok(config.ServiceName)))
+15     .AllowAnonymous();
+16  app.MapPost("/cart/items", (CartItem item) =>
+17  {
+18      items.Add(new { sku = item.Sku, qty = item.Qty ?? 1 });
+19      return Results.Created("/cart/items", new { items });
+20  });
 20
 21  Console.WriteLine($"[{config.ServiceName}] listening on :{config.Port}");
 22  app.Run();
@@ -110,9 +112,10 @@ Toàn bộ nội dung thực, kèm số dòng, của các file quyết định �
  6  var serviceName = Environment.GetEnvironmentVariable("SERVICE_NAME") ?? "order";
  7
  8  // Liveness probe: không xác thực, không tác dụng phụ, đăng ký trước UseAuthentication (nếu milestone sau thêm auth).
- 9  app.MapGet("/health", () => Results.Ok(HealthResponse.Ok(serviceName)));
-10
-11  app.Run();
+ 9  app.MapGet("/health", () => Results.Ok(HealthResponse.Ok(serviceName)))
+10     .AllowAnonymous();
+11
+12  app.Run();
 ```
 
 ### `services/payment/Program.cs`
@@ -126,9 +129,10 @@ Toàn bộ nội dung thực, kèm số dòng, của các file quyết định �
  6  var serviceName = Environment.GetEnvironmentVariable("SERVICE_NAME") ?? "payment";
  7
  8  // Liveness probe: không xác thực, không tác dụng phụ, đăng ký trước UseAuthentication (nếu milestone sau thêm auth).
- 9  app.MapGet("/health", () => Results.Ok(HealthResponse.Ok(serviceName)));
-10
-11  app.Run();
+ 9  app.MapGet("/health", () => Results.Ok(HealthResponse.Ok(serviceName)))
+10     .AllowAnonymous();
+11
+12  app.Run();
 ```
 
 ### `services/Catalog/HealthResponse.cs`
@@ -296,7 +300,7 @@ Toàn bộ nội dung thực, kèm số dòng, của các file quyết định �
 | Cùng JSON shape `{"service":...,"status":"ok"}` | dòng log Test 1 dưới | dòng log Test 1 | dòng log Test 1 | dòng log Test 1 |
 | `.csproj` riêng, `Sdk.Web` + `net10.0`, không `ProjectReference` chéo | `Catalog.csproj:1,4` | `Cart.csproj:1,4` | `order.csproj:1,4` | `payment.csproj:1,4` |
 | Solution tham chiếu project riêng | `starci-shop.slnx:4` | `starci-shop.slnx:3` | `starci-shop.slnx:5` | `starci-shop.slnx:6` |
-| `/health` map trước điểm nghiệp vụ, không auth middleware | `Program.cs:11-12` | `Program.cs:13-14` | `Program.cs:8-9` | `Program.cs:8-9` |
+| `/health` unauthenticated, side-effect free | `Program.cs:12-13` (`AllowAnonymous`) | `Program.cs:14-15` (`AllowAnonymous`) | `Program.cs:9-10` (`AllowAnonymous`) | `Program.cs:9-10` (`AllowAnonymous`) |
 
 Catalog/Cart riêng có thêm (đã xác lập từ milestone trước, không đổi ở đây):
 

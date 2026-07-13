@@ -6,6 +6,7 @@ var app = builder.Build();
 var serviceName = Environment.GetEnvironmentVariable("SERVICE_NAME") ?? "order";
 
 // Liveness probe: không xác thực, không tác dụng phụ, đăng ký trước UseAuthentication (nếu milestone sau thêm auth).
-app.MapGet("/health", () => Results.Ok(HealthResponse.Ok(serviceName)));
+app.MapGet("/health", () => Results.Ok(HealthResponse.Ok(serviceName)))
+   .AllowAnonymous();
 
 app.Run();

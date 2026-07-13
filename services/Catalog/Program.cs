@@ -9,7 +9,8 @@ builder.WebHost.UseUrls($"http://localhost:{config.Port}");
 var app = builder.Build();
 
 // Liveness probe: không xác thực, không tác dụng phụ, đăng ký trước UseAuthentication (nếu milestone sau thêm auth).
-app.MapGet("/health", () => Results.Ok(HealthResponse.Ok(config.ServiceName)));
+app.MapGet("/health", () => Results.Ok(HealthResponse.Ok(config.ServiceName)))
+   .AllowAnonymous();
 app.MapGet("/products", () => new[] { new { id = "sku-1", title = "Starter Mug", priceCents = 1200 } });
 
 Console.WriteLine($"[{config.ServiceName}] listening on :{config.Port}");
