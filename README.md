@@ -13,44 +13,49 @@ Monorepo .NET, mỗi service là một project độc lập trong một solution
 starci-shop.slnx              # solution gốc, tham chiếu 4 service + Shop.Contracts
 packages/
   Shop.Contracts/  Shop.Contracts.csproj  Money.cs  ProductId.cs  OrderStatus.cs   # record/enum thuần, dùng chung
+scripts/
+  dev.sh                       # LỆNH GỐC: dựng Catalog+Cart+order cùng lúc
+  health.csx                   # probe /health cả đội (dotnet script)
 services/
-  Catalog/  Catalog.csproj  Program.cs  Config.cs  HealthResponse.cs  PriceQuote.cs
-  Cart/     Cart.csproj     Program.cs  Config.cs  HealthResponse.cs  CartLine.cs
-  order/    order.csproj    Program.cs             HealthResponse.cs  Order.cs
-  payment/  payment.csproj  Program.cs             HealthResponse.cs
+  Catalog/  Catalog.csproj  Program.cs  Properties/launchSettings.json  PriceQuote.cs   (Config.cs, HealthResponse.cs — dead code)
+  Cart/     Cart.csproj     Program.cs  Properties/launchSettings.json  CartLine.cs      (Config.cs, HealthResponse.cs — dead code)
+  order/    order.csproj    Program.cs  Properties/launchSettings.json  Order.cs         (HealthResponse.cs — dead code)
+  payment/  payment.csproj  Program.cs  Properties/launchSettings.json  HealthResponse.cs   (chưa đổi milestone này)
 ```
 
 Mỗi service một `.csproj` riêng (`Microsoft.NET.Sdk.Web`, `net10.0`), build và chạy độc lập, KHÔNG `ProjectReference` sang service khác — nhưng có tham chiếu `packages/Shop.Contracts` (class library `Microsoft.NET.Sdk`) cho các kiểu dùng chung. `Shop.Contracts` không tham chiếu ngược lại service nào.
 
-## GET /health — đồng nhất trên cả 4 service, không có project dùng chung
+## Dựng cả cửa hàng bằng một lệnh + probe /health
 
-Cả 4 service trả cùng shape JSON (`{"service":"<tên>","status":"ok"}`) qua một record `HealthResponse` với factory `Ok(service)`. Điểm quan trọng: **mỗi service tự khai báo bản `HealthResponse.cs` của riêng mình** (4 file giống hệt nhau về nội dung, khác namespace/không namespace) — `HealthResponse` **KHÔNG** nằm trong `Shop.Contracts`. Đây là chủ ý, và là ranh giới phân chia của repo:
+Lệnh gốc `bash scripts/dev.sh` khởi động Catalog(5001) + Cart(5002) + order(5003) đồng thời, mỗi tiến trình `dotnet run` riêng với log tiền tố `[<svc>]`; khi một service thoát, `wait -n` trả về và script kết thúc (mã ≠ 0).
 
-- **Value type domain dùng chung xuyên service** (`Money`, `ProductId`, `OrderStatus`) → đặt trong `packages/Shop.Contracts` để có **single source of truth**. Đánh đổi có ý thức: sửa một kiểu trong contracts thì mọi consumer tham chiếu nó phải rebuild — bù lại, không thể có hai service hiểu `Money` theo hai kiểu khác nhau (đổi tên `Money.AmountMinor` phá build ở cả `order` lẫn `Catalog`).
-- **DTO cục bộ của từng service** (như `HealthResponse` — shape liveness) → mỗi service tự giữ bản riêng, để một thay đổi health không kéo theo rebuild service khác. Không phải mọi record giống nhau đều đáng gom; chỉ kiểu *phải khớp nhau qua ranh giới service* mới vào `Shop.Contracts`.
+> Về ranh giới chia sẻ kiểu: value type domain xuyên service (`Money`/`ProductId`/`OrderStatus`) nằm trong `packages/Shop.Contracts` (single source of truth); còn DTO liveness `HealthResponse` KHÔNG chia sẻ — xem luật #1 trong `AGENTS.md`.
 
-Identity (tên service) của **cả 4 service** đều đọc từ environment variable `SERVICE_NAME`, có default riêng, **không hardcode**:
-- Catalog/Cart: qua `Config.Load(...)` → `config.ServiceName` (default `"catalog"`/`"cart"`).
-- order/payment: qua `Environment.GetEnvironmentVariable("SERVICE_NAME") ?? "order"` / `?? "payment"` — cùng cơ chế, cùng tên biến env với Catalog/Cart, không phải một kiểu đọc config khác.
+Chứng minh cả đội xanh: `dotnet script scripts/health.csx` gọi `/health` từng cổng, in `OK`/`ERR` mỗi service, `ALL GREEN`/`SOME RED`, thoát mã 0 nếu tất cả xanh — khác 0 nếu có cái down.
 
-`/health` được đánh dấu `.AllowAnonymous()` ở cả bốn service, nên không yêu cầu xác thực ngay cả khi milestone sau thêm `UseAuthentication`/`UseAuthorization`; handler chỉ tạo response từ identity đã nạp và không có side effect.
+Cả 4 service trả cùng shape JSON `{"service":"<tên>","status":"ok"}`, nhưng khác cơ chế:
+- **Catalog/Cart/order:** `/health` inline `Results.Json(new { service = "<tên>", status = "ok" })` (tên hardcode), cổng chốt bằng `app.Run("http://localhost:<port>")` + `launchSettings.json`.
+- **payment:** CHƯA đổi — vẫn record `HealthResponse.Ok(serviceName)` với `serviceName` từ `SERVICE_NAME` env, `.AllowAnonymous()`.
+
+**Windows caveat:** trap `kill ${pids[*]}` trong dev.sh chỉ hạ subshell; tiến trình `dotnet` cháu bị mồ côi vẫn giữ cổng — dọn bằng `taskkill //F //PID <pid>`.
 
 ## Lệnh
 
 ```bash
 dotnet build                                      # build cả 4
-dotnet build services/Catalog                     # build cô lập 1 service
-dotnet run --project services/Catalog             # mặc định :5001
-PORT=8080 dotnet run --project services/Catalog   # override cổng qua env
-dotnet run --project services/Cart                # mặc định :5002
-SERVICE_NAME=order-2 dotnet run --project services/order     # override tên qua env
+bash scripts/dev.sh                               # dựng Catalog+Cart+order cùng lúc (5001/5002/5003)
+dotnet script scripts/health.csx                  # probe /health cả đội (cần: dotnet tool install -g dotnet-script)
+dotnet run --project services/Catalog             # chạy riêng Catalog (cổng cứng 5001)
+dotnet run --project services/Cart                # chạy riêng Cart   (cổng cứng 5002)
 ```
 
-Health check: `GET /health` → `{"service":"<tên>","status":"ok"}`.
+Health check: `GET /health` → `{"service":"<tên>","status":"ok"}`. Cổng nay chốt cứng trong `app.Run(...)` — `PORT`/`SERVICE_NAME` env không còn override Catalog/Cart/order.
 
 ---
 
 # Mã nguồn đầy đủ (để đối chiếu chấm điểm)
+
+> ⚠️ **Phụ lục dưới đây phản ánh milestone TRƯỚC** (Catalog/Cart đọc `PORT`/`SERVICE_NAME` từ env qua `Config.Load`; `/health` qua record `HealthResponse` + `.AllowAnonymous()`). Sau milestone "một lệnh dựng cả cửa hàng", **Catalog/Cart/order** đã đổi sang cổng cứng `app.Run("http://localhost:<port>")` + `launchSettings.json` và `/health` inline `Results.Json(...)` — xem mục "Dựng cả cửa hàng bằng một lệnh" ở trên. Các listing `Program.cs`, bảng tiêu chí và transcript bên dưới **chưa regenerate** cho milestone mới (chỉ phần **payment** còn khớp thực tế).
 
 Toàn bộ nội dung thực, kèm số dòng, của các file quyết định — cho **cả 4** service.
 

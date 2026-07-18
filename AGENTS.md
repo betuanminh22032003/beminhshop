@@ -9,18 +9,19 @@ starci-shop.slnx        # solution gốc — GỌI TÊN cả 4 service + Shop.Co
 README.md               # bản đồ service — ĐỌC TRƯỚC khi sửa bất kỳ service nào
 packages/
   Shop.Contracts/        # contract dùng chung: CHỈ record/enum thuần (Money, ProductId, OrderStatus), KHÔNG logic
+scripts/                 # dev.sh (dựng Catalog+Cart+order cùng lúc), health.csx (probe /health)
 services/
-  Catalog/               # sản phẩm         (mặc định http://localhost:5001, đọc PORT/SERVICE_NAME từ env)
-  Cart/                  # giỏ hàng         (mặc định http://localhost:5002, đọc PORT/SERVICE_NAME từ env)
-  order/                 # đơn hàng         (http://localhost:5003)
-  payment/               # thanh toán       (http://localhost:5004)
+  Catalog/               # sản phẩm         (http://localhost:5001, cổng cứng qua app.Run + launchSettings)
+  Cart/                  # giỏ hàng         (http://localhost:5002, cổng cứng qua app.Run + launchSettings)
+  order/                 # đơn hàng         (http://localhost:5003, cổng cứng qua app.Run + launchSettings)
+  payment/               # thanh toán       (http://localhost:5004, launchSettings — chưa đổi milestone này)
 ```
 
-Mỗi service: một `.csproj` (`Microsoft.NET.Sdk.Web`, `net10.0`) + `Program.cs` riêng. ASP.NET Core minimal API. **Catalog/Cart KHÔNG có `Properties/launchSettings.json`** (đã gỡ để env là nguồn cổng duy nhất — xem mục Config); order/payment vẫn còn `launchSettings.json`.
+Mỗi service: một `.csproj` (`Microsoft.NET.Sdk.Web`, `net10.0`) + `Program.cs` riêng. ASP.NET Core minimal API. **Cả 4 service đều có `Properties/launchSettings.json`** khai báo `applicationUrl` cổng cố định (Catalog 5001, Cart 5002, order 5003, payment 5004) để `dotnet run` tự lên đúng cổng.
 
 **Casing có chủ đích:** `Catalog`/`Cart` dùng PascalCase (thư mục, `.csproj`, namespace đều khớp `Catalog`/`Cart`) vì đã có `Config.cs` với `namespace Catalog;` / `namespace Cart;`. `order`/`payment` chưa được nâng cấp lên pattern này — đừng tự ý đổi tên chúng khi không có yêu cầu, và đừng "sửa cho đồng bộ" nếu task không nhắc tới.
 
-**Config từ env (chỉ Catalog, Cart hiện tại):** đọc `PORT` và `SERVICE_NAME` qua `Config.Load(defaultPort, defaultName)` trong `Config.cs` của từng service — mỗi service tự định nghĩa `ServiceConfig`/`Config` của riêng mình (namespace khác nhau), KHÔNG factor ra project dùng chung. `Program.cs` nối `config.Port` vào `builder.WebHost.UseUrls(...)` và `config.ServiceName` vào cả log khởi động lẫn `/health`. `PORT` không parse được thành số → ném `InvalidOperationException` ngay khi khởi động, không âm thầm fallback. **Không thêm lại `launchSettings.json` với `applicationUrl` cứng cho Catalog/Cart** — nó đặt `ASPNETCORE_URLS` và làm mờ bằng chứng env-điều-khiển-cổng.
+**Cổng cố định (Catalog/Cart/order):** mỗi service chốt cổng của mình ngay trong `Program.cs` qua `app.Run("http://localhost:<port>")` (5001/5002/5003), kèm `Properties/launchSettings.json` khai báo `applicationUrl` cùng cổng để `dotnet run` khởi động đúng chỗ. `/health` trả shape cố định `{ service, status }` qua `Results.Json(...)` inline, tên service hardcode trong handler. (payment CHƯA đổi ở milestone này — vẫn `SERVICE_NAME` env + record `HealthResponse` + launchSettings 5004.) Ghi chú: `Config.cs`/`HealthResponse.cs` của Catalog/Cart/order còn nằm trong project nhưng `Program.cs` không còn tham chiếu — dead code, dọn được nếu muốn.
 
 ## Luật ranh giới (bất khả xâm phạm)
 
@@ -34,12 +35,14 @@ Mỗi service: một `.csproj` (`Microsoft.NET.Sdk.Web`, `net10.0`) + `Program.c
 
 ```bash
 dotnet build                                  # build cả 4 service + Shop.Contracts từ gốc
-dotnet build services/Catalog                 # build 1 service độc lập (chỉ kéo theo Shop.Contracts, không kéo Cart)
-PORT=5001 dotnet run --project services/Catalog  # chạy 1 service (health: GET /health)
+bash scripts/dev.sh                           # LỆNH GỐC: dựng Catalog+Cart+order cùng lúc (5001/5002/5003)
+dotnet script scripts/health.csx              # probe /health cả đội — OK/ERR mỗi service, exit≠0 nếu có cái down
+dotnet build services/Catalog                 # build 1 service độc lập (chỉ kéo theo Shop.Contracts)
+dotnet run --project services/Catalog         # chạy 1 service (cổng cứng 5001 trong app.Run)
 dotnet sln list                               # xác nhận đủ 5 project (4 service + Shop.Contracts)
 ```
 
-Chạy dotnet ở **gốc repo** khi build/thao tác solution. Catalog/Cart lấy `PORT`/`SERVICE_NAME` từ env (mặc định 5001/"catalog" và 5002/"cart"); order/payment vẫn cố định theo `Properties/launchSettings.json` (5003/5004).
+Chạy dotnet ở **gốc repo** khi build/thao tác solution. Catalog/Cart/order chốt cổng trong `app.Run(...)` (5001/5002/5003) kèm `launchSettings.json` cùng cổng; payment vẫn theo `launchSettings.json` (5004). `bash scripts/dev.sh` là lệnh gốc dựng cả ba; `dotnet script scripts/health.csx` là probe (cần `dotnet tool install -g dotnet-script`). **Windows:** trap của dev.sh (`kill ${pids[*]}`) chỉ hạ subshell, tiến trình `dotnet` cháu bị mồ côi vẫn giữ cổng — dọn bằng `taskkill //F //PID <pid>` (tìm qua `netstat -ano | grep :5001`).
 
 **Cảnh báo Windows (NTFS case-insensitive):** đổi tên chỉ khác hoa/thường (vd. `catalog` → `Catalog`) phải qua bước trung gian: `mv catalog __tmp && mv __tmp Catalog` — `mv catalog Catalog` trực tiếp báo lỗi "move vào chính nó". Sau khi đổi tên project, nếu `dotnet build` vẫn in ra path/AssemblyName casing cũ, đó là MSBuild build-server (node reuse) cache stale — chạy `dotnet build-server shutdown`, xoá `bin/`/`obj/`, rồi build lại.
 
