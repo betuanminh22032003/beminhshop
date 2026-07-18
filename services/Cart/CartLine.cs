@@ -1,3 +1,5 @@
+using Shop.Contracts;
+
 namespace Cart;
 
 // Một dòng trong giỏ: item khách đang chọn, chưa đặt đơn.

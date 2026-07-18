@@ -1,3 +1,5 @@
+using Shop.Contracts;
+
 public sealed record OrderLine(ProductId ProductId, int Quantity, Money UnitPrice);
 
 public sealed class Order
