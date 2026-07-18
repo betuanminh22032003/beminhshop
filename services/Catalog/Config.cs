@@ -1,6 +1,6 @@
 namespace Catalog;
 
-public record ServiceConfig(int Port, string ServiceName);
+public record ServiceConfig(int Port, string ServiceName, string DatabaseUrl);
 
 public static class Config
 {
@@ -11,6 +11,9 @@ public static class Config
         if (!string.IsNullOrEmpty(rawPort) && !int.TryParse(rawPort, out port))
             throw new InvalidOperationException($"Invalid PORT=\"{rawPort}\": expected a number");
         var name = Environment.GetEnvironmentVariable("SERVICE_NAME") ?? defaultName;
-        return new ServiceConfig(port, name);
+        // URL DB catalog được TIÊM lúc chạy (từ env), không bao giờ nướng vào image.
+        var databaseUrl = Environment.GetEnvironmentVariable("CATALOG_DATABASE_URL")
+                          ?? "postgres://localhost:5432/catalog";
+        return new ServiceConfig(port, name, databaseUrl);
     }
 }

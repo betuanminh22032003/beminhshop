@@ -17,7 +17,7 @@ scripts/
   dev.sh                       # LỆNH GỐC: dựng Catalog+Cart+order cùng lúc
   health.csx                   # probe /health cả đội (dotnet script)
 services/
-  Catalog/  Catalog.csproj  Program.cs  Properties/launchSettings.json  PriceQuote.cs   (Config.cs, HealthResponse.cs — dead code)
+  Catalog/  Catalog.csproj  Program.cs  Config.cs  HealthResponse.cs  PriceQuote.cs   (env-driven + Dockerized — Config/HealthResponse LÀ code sống, không launchSettings)
   Cart/     Cart.csproj     Program.cs  Properties/launchSettings.json  CartLine.cs      (Config.cs, HealthResponse.cs — dead code)
   order/    order.csproj    Program.cs  Properties/launchSettings.json  Order.cs         (HealthResponse.cs — dead code)
   payment/  payment.csproj  Program.cs  Properties/launchSettings.json  HealthResponse.cs   (chưa đổi milestone này)
@@ -34,7 +34,8 @@ Lệnh gốc `bash scripts/dev.sh` khởi động Catalog(5001) + Cart(5002) + o
 Chứng minh cả đội xanh: `dotnet script scripts/health.csx` gọi `/health` từng cổng, in `OK`/`ERR` mỗi service, `ALL GREEN`/`SOME RED`, thoát mã 0 nếu tất cả xanh — khác 0 nếu có cái down.
 
 Cả 4 service trả cùng shape JSON `{"service":"<tên>","status":"ok"}`, nhưng khác cơ chế:
-- **Catalog/Cart/order:** `/health` inline `Results.Json(new { service = "<tên>", status = "ok" })` (tên hardcode), cổng chốt bằng `app.Run("http://localhost:<port>")` + `launchSettings.json`.
+- **Cart/order:** `/health` inline `Results.Json(new { service = "<tên>", status = "ok" })` (tên hardcode), cổng chốt bằng `app.Run("http://localhost:<port>")` + `launchSettings.json`.
+- **Catalog:** env-driven (milestone container) — `/health` qua record `HealthResponse.Ok(config.ServiceName)`, cổng từ `PORT` env (mặc định 5001), bind `0.0.0.0`; xem mục Docker. dev.sh vẫn dựng Catalog trên 5001 như thường.
 - **payment:** CHƯA đổi — vẫn record `HealthResponse.Ok(serviceName)` với `serviceName` từ `SERVICE_NAME` env, `.AllowAnonymous()`.
 
 **Windows caveat:** trap `kill ${pids[*]}` trong dev.sh chỉ hạ subshell; tiến trình `dotnet` cháu bị mồ côi vẫn giữ cổng — dọn bằng `taskkill //F //PID <pid>`.
@@ -45,11 +46,25 @@ Cả 4 service trả cùng shape JSON `{"service":"<tên>","status":"ok"}`, như
 dotnet build                                      # build cả 4
 bash scripts/dev.sh                               # dựng Catalog+Cart+order cùng lúc (5001/5002/5003)
 dotnet script scripts/health.csx                  # probe /health cả đội (cần: dotnet tool install -g dotnet-script)
-dotnet run --project services/Catalog             # chạy riêng Catalog (cổng cứng 5001)
+dotnet run --project services/Catalog             # chạy riêng Catalog (đọc PORT env, mặc định 5001)
 dotnet run --project services/Cart                # chạy riêng Cart   (cổng cứng 5002)
 ```
 
-Health check: `GET /health` → `{"service":"<tên>","status":"ok"}`. Cổng nay chốt cứng trong `app.Run(...)` — `PORT`/`SERVICE_NAME` env không còn override Catalog/Cart/order.
+Health check: `GET /health` → `{"service":"<tên>","status":"ok"}`. Cart/order chốt cổng cứng trong `app.Run(...)`; **Catalog đọc `PORT` từ env** (mặc định 5001, bind `0.0.0.0`, Dockerized).
+
+## Docker — Catalog (milestone container)
+
+`Dockerfile` + `.dockerignore` ở **gốc repo** đóng gói service **Catalog** (đơn tầng). Build context là gốc vì Catalog tham chiếu `packages/Shop.Contracts`. Catalog đọc `PORT` **và** `CATALOG_DATABASE_URL` từ env lúc chạy và bind `0.0.0.0` (để reachable qua `-p`):
+
+```bash
+docker build -t starci-shop/catalog:dev .
+docker run -d --name catalog -p 3001:3001 \
+  -e PORT=3001 -e CATALOG_DATABASE_URL=postgres://catalog-db:5432/catalog \
+  starci-shop/catalog:dev
+curl -s http://localhost:3001/products   # {"items":[{"id":"sku-001",...}],"total":3}
+```
+
+Đổi `-e PORT=4000 -p 4000:4000` cùng image đó → bind 4000 (cổng từ env, không cứng hóa); `docker logs catalog` in `[catalog] listening on :<port>`. Đơn tầng ở milestone này — thu nhỏ bằng multi-stage là task kế tiếp.
 
 ---
 
