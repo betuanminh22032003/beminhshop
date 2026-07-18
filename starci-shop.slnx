@@ -1,4 +1,7 @@
 <Solution>
+  <Folder Name="/packages/">
+    <Project Path="packages/Shop.Contracts/Shop.Contracts.csproj" />
+  </Folder>
   <Folder Name="/services/">
     <Project Path="services/Cart/Cart.csproj" />
     <Project Path="services/Catalog/Catalog.csproj" />

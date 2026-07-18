@@ -1,6 +1,6 @@
 # StarCi Shop — Bản đồ Service
 
-Monorepo .NET, mỗi service là một project độc lập trong một solution. Không có project "logic dùng chung".
+Monorepo .NET, mỗi service là một project độc lập trong một solution. Không chia sẻ business logic; chỉ chia sẻ **contract dữ liệu thuần** qua `packages/Shop.Contracts` (record/enum: `Money`, `ProductId`, `OrderStatus`).
 
 - **Catalog** : Sở hữu danh sách sản phẩm và đọc chi tiết sản phẩm. KHÔNG sở hữu giỏ hàng, đơn hàng, hay tiền.
 - **Cart** : Sở hữu lựa chọn item đang dở của một khách (thêm / xóa / xem). KHÔNG đặt đơn hay thu tiền.
@@ -10,22 +10,26 @@ Monorepo .NET, mỗi service là một project độc lập trong một solution
 ## Bố cục
 
 ```
-starci-shop.slnx              # solution gốc, tham chiếu 4 project service
+starci-shop.slnx              # solution gốc, tham chiếu 4 service + Shop.Contracts
+packages/
+  Shop.Contracts/  Shop.Contracts.csproj  Money.cs  ProductId.cs  OrderStatus.cs   # record/enum thuần, dùng chung
 scripts/
   dev.sh                       # LỆNH GỐC: dựng Catalog+Cart+order cùng lúc
   health.csx                   # probe /health cả đội (dotnet script)
 services/
-  Catalog/  Catalog.csproj  Program.cs  Properties/launchSettings.json   (Config.cs, HealthResponse.cs — dead code)
-  Cart/     Cart.csproj     Program.cs  Properties/launchSettings.json   (Config.cs, HealthResponse.cs — dead code)
-  order/    order.csproj    Program.cs  Properties/launchSettings.json   (HealthResponse.cs — dead code)
-  payment/  payment.csproj  Program.cs  Properties/launchSettings.json   HealthResponse.cs   (chưa đổi milestone này)
+  Catalog/  Catalog.csproj  Program.cs  Properties/launchSettings.json  PriceQuote.cs   (Config.cs, HealthResponse.cs — dead code)
+  Cart/     Cart.csproj     Program.cs  Properties/launchSettings.json  CartLine.cs      (Config.cs, HealthResponse.cs — dead code)
+  order/    order.csproj    Program.cs  Properties/launchSettings.json  Order.cs         (HealthResponse.cs — dead code)
+  payment/  payment.csproj  Program.cs  Properties/launchSettings.json  HealthResponse.cs   (chưa đổi milestone này)
 ```
 
-Mỗi service một `.csproj` riêng (`Microsoft.NET.Sdk.Web`, `net10.0`), build và chạy độc lập, không `ProjectReference` chéo.
+Mỗi service một `.csproj` riêng (`Microsoft.NET.Sdk.Web`, `net10.0`), build và chạy độc lập, KHÔNG `ProjectReference` sang service khác — nhưng có tham chiếu `packages/Shop.Contracts` (class library `Microsoft.NET.Sdk`) cho các kiểu dùng chung. `Shop.Contracts` không tham chiếu ngược lại service nào.
 
 ## Dựng cả cửa hàng bằng một lệnh + probe /health
 
 Lệnh gốc `bash scripts/dev.sh` khởi động Catalog(5001) + Cart(5002) + order(5003) đồng thời, mỗi tiến trình `dotnet run` riêng với log tiền tố `[<svc>]`; khi một service thoát, `wait -n` trả về và script kết thúc (mã ≠ 0).
+
+> Về ranh giới chia sẻ kiểu: value type domain xuyên service (`Money`/`ProductId`/`OrderStatus`) nằm trong `packages/Shop.Contracts` (single source of truth); còn DTO liveness `HealthResponse` KHÔNG chia sẻ — xem luật #1 trong `AGENTS.md`.
 
 Chứng minh cả đội xanh: `dotnet script scripts/health.csx` gọi `/health` từng cổng, in `OK`/`ERR` mỗi service, `ALL GREEN`/`SOME RED`, thoát mã 0 nếu tất cả xanh — khác 0 nếu có cái down.
 
