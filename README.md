@@ -1,6 +1,6 @@
 # StarCi Shop — Bản đồ Service
 
-Monorepo .NET, mỗi service là một project độc lập trong một solution. Không có project "logic dùng chung".
+Monorepo .NET, mỗi service là một project độc lập trong một solution. Không chia sẻ business logic; chỉ chia sẻ **contract dữ liệu thuần** qua `packages/Shop.Contracts` (record/enum: `Money`, `ProductId`, `OrderStatus`).
 
 - **Catalog** : Sở hữu danh sách sản phẩm và đọc chi tiết sản phẩm. KHÔNG sở hữu giỏ hàng, đơn hàng, hay tiền.
 - **Cart** : Sở hữu lựa chọn item đang dở của một khách (thêm / xóa / xem). KHÔNG đặt đơn hay thu tiền.
@@ -10,19 +10,24 @@ Monorepo .NET, mỗi service là một project độc lập trong một solution
 ## Bố cục
 
 ```
-starci-shop.slnx              # solution gốc, tham chiếu 4 project service
+starci-shop.slnx              # solution gốc, tham chiếu 4 service + Shop.Contracts
+packages/
+  Shop.Contracts/  Shop.Contracts.csproj  Money.cs  ProductId.cs  OrderStatus.cs   # record/enum thuần, dùng chung
 services/
-  Catalog/  Catalog.csproj  Program.cs  Config.cs  HealthResponse.cs
-  Cart/     Cart.csproj     Program.cs  Config.cs  HealthResponse.cs
-  order/    order.csproj    Program.cs             HealthResponse.cs
+  Catalog/  Catalog.csproj  Program.cs  Config.cs  HealthResponse.cs  PriceQuote.cs
+  Cart/     Cart.csproj     Program.cs  Config.cs  HealthResponse.cs  CartLine.cs
+  order/    order.csproj    Program.cs             HealthResponse.cs  Order.cs
   payment/  payment.csproj  Program.cs             HealthResponse.cs
 ```
 
-Mỗi service một `.csproj` riêng (`Microsoft.NET.Sdk.Web`, `net10.0`), build và chạy độc lập, không `ProjectReference` chéo.
+Mỗi service một `.csproj` riêng (`Microsoft.NET.Sdk.Web`, `net10.0`), build và chạy độc lập, KHÔNG `ProjectReference` sang service khác — nhưng có tham chiếu `packages/Shop.Contracts` (class library `Microsoft.NET.Sdk`) cho các kiểu dùng chung. `Shop.Contracts` không tham chiếu ngược lại service nào.
 
 ## GET /health — đồng nhất trên cả 4 service, không có project dùng chung
 
-Cả 4 service trả cùng shape JSON (`{"service":"<tên>","status":"ok"}`) qua một record `HealthResponse` với factory `Ok(service)`. Điểm quan trọng: **mỗi service tự khai báo bản `HealthResponse.cs` của riêng mình** (4 file giống hệt nhau về nội dung, khác namespace/không namespace) — **không** có một project `Shared` chứa record dùng chung. Đây là cách đúng để có "response shape đồng nhất" trong kiến trúc microservice: chia sẻ **contract** (shape của response), không chia sẻ **code biên dịch** — nếu có một project `Shared` được `ProjectReference` bởi cả 4 service, sửa `HealthResponse` sẽ buộc build lại tất cả, vi phạm "mỗi service build/deploy độc lập" (luật ranh giới #1–#3 trong `AGENTS.md`).
+Cả 4 service trả cùng shape JSON (`{"service":"<tên>","status":"ok"}`) qua một record `HealthResponse` với factory `Ok(service)`. Điểm quan trọng: **mỗi service tự khai báo bản `HealthResponse.cs` của riêng mình** (4 file giống hệt nhau về nội dung, khác namespace/không namespace) — `HealthResponse` **KHÔNG** nằm trong `Shop.Contracts`. Đây là chủ ý, và là ranh giới phân chia của repo:
+
+- **Value type domain dùng chung xuyên service** (`Money`, `ProductId`, `OrderStatus`) → đặt trong `packages/Shop.Contracts` để có **single source of truth**. Đánh đổi có ý thức: sửa một kiểu trong contracts thì mọi consumer tham chiếu nó phải rebuild — bù lại, không thể có hai service hiểu `Money` theo hai kiểu khác nhau (đổi tên `Money.AmountMinor` phá build ở cả `order` lẫn `Catalog`).
+- **DTO cục bộ của từng service** (như `HealthResponse` — shape liveness) → mỗi service tự giữ bản riêng, để một thay đổi health không kéo theo rebuild service khác. Không phải mọi record giống nhau đều đáng gom; chỉ kiểu *phải khớp nhau qua ranh giới service* mới vào `Shop.Contracts`.
 
 Identity (tên service) của **cả 4 service** đều đọc từ environment variable `SERVICE_NAME`, có default riêng, **không hardcode**:
 - Catalog/Cart: qua `Config.Load(...)` → `config.ServiceName` (default `"catalog"`/`"cart"`).
