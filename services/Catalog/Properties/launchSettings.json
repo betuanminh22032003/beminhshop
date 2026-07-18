@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "catalog": {
+      "commandName": "Project",
+      "applicationUrl": "http://localhost:5001"
+    }
+  }
+}

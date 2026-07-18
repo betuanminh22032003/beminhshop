@@ -3,10 +3,7 @@
 var builder = WebApplication.CreateBuilder(args);
 var app = builder.Build();
 
-var serviceName = Environment.GetEnvironmentVariable("SERVICE_NAME") ?? "order";
+// /health: shape cố định { service, status } cho probe gốc (scripts/health.csx).
+app.MapGet("/health", () => Results.Json(new { service = "order", status = "ok" }));
 
-// Liveness probe: không xác thực, không tác dụng phụ, đăng ký trước UseAuthentication (nếu milestone sau thêm auth).
-app.MapGet("/health", () => Results.Ok(HealthResponse.Ok(serviceName)))
-   .AllowAnonymous();
-
-app.Run();
+app.Run("http://localhost:5003");
