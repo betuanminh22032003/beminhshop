@@ -48,6 +48,20 @@ SERVICE_NAME=order-2 dotnet run --project services/order     # override tên qua
 
 Health check: `GET /health` → `{"service":"<tên>","status":"ok"}`.
 
+## Docker — Catalog (milestone container)
+
+`Dockerfile` + `.dockerignore` ở **gốc repo** đóng gói service **Catalog** (đơn tầng). Build context là gốc vì Catalog tham chiếu `packages/Shop.Contracts`. Catalog đọc `PORT` **và** `CATALOG_DATABASE_URL` từ env lúc chạy và bind `0.0.0.0` (để reachable qua `-p`):
+
+```bash
+docker build -t starci-shop/catalog:dev .
+docker run -d --name catalog -p 3001:3001 \
+  -e PORT=3001 -e CATALOG_DATABASE_URL=postgres://catalog-db:5432/catalog \
+  starci-shop/catalog:dev
+curl -s http://localhost:3001/products   # {"items":[{"id":"sku-001",...}],"total":3}
+```
+
+Đổi `-e PORT=4000 -p 4000:4000` cùng image đó → bind 4000 (cổng từ env, không cứng hóa); `docker logs catalog` in `[catalog] listening on :<port>`. Đơn tầng ở milestone này — thu nhỏ bằng multi-stage là task kế tiếp.
+
 ---
 
 # Mã nguồn đầy đủ (để đối chiếu chấm điểm)

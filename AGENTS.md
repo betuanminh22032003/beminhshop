@@ -37,6 +37,8 @@ dotnet build                                  # build cả 4 service + Shop.Cont
 dotnet build services/Catalog                 # build 1 service độc lập (chỉ kéo theo Shop.Contracts, không kéo Cart)
 PORT=5001 dotnet run --project services/Catalog  # chạy 1 service (health: GET /health)
 dotnet sln list                               # xác nhận đủ 5 project (4 service + Shop.Contracts)
+docker build -t starci-shop/catalog:dev .     # đóng gói Catalog (Dockerfile ở GỐC; context=gốc vì cần Shop.Contracts)
+docker run -d -p 3001:3001 -e PORT=3001 -e CATALOG_DATABASE_URL=... starci-shop/catalog:dev  # cổng+DB từ env
 ```
 
 Chạy dotnet ở **gốc repo** khi build/thao tác solution. Catalog/Cart lấy `PORT`/`SERVICE_NAME` từ env (mặc định 5001/"catalog" và 5002/"cart"); order/payment vẫn cố định theo `Properties/launchSettings.json` (5003/5004).

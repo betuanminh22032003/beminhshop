@@ -1,0 +1,8 @@
+# Không đưa artifact build của host vào image build context.
+**/bin/
+**/obj/
+.git/
+.vs/
+.vscode/
+*.user
+scripts/
