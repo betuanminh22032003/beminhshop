@@ -70,7 +70,7 @@ curl -s http://localhost:3001/products   # {"items":[{"id":"sku-001",...}],"tota
 
 # Mã nguồn đầy đủ (để đối chiếu chấm điểm)
 
-> ⚠️ **Phụ lục dưới đây phản ánh milestone TRƯỚC** (Catalog/Cart đọc `PORT`/`SERVICE_NAME` từ env qua `Config.Load`; `/health` qua record `HealthResponse` + `.AllowAnonymous()`). Sau milestone "một lệnh dựng cả cửa hàng", **Catalog/Cart/order** đã đổi sang cổng cứng `app.Run("http://localhost:<port>")` + `launchSettings.json` và `/health` inline `Results.Json(...)` — xem mục "Dựng cả cửa hàng bằng một lệnh" ở trên. Các listing `Program.cs`, bảng tiêu chí và transcript bên dưới **chưa regenerate** cho milestone mới (chỉ phần **payment** còn khớp thực tế).
+> ⚠️ **Listing Catalog dưới đây đã regenerate cho milestone container** — `services/Catalog/Program.cs` + `services/Catalog/Config.cs` khớp ĐÚNG source hiện tại: đọc `PORT`/`SERVICE_NAME`/`CATALOG_DATABASE_URL` từ env qua `Config.Load`, `UseUrls` bind `0.0.0.0` (reachable qua `-p`), `GET /products` trả `{items,total}` với `sku-001`/`sku-002`/`sku-003`, `/health` qua record `HealthResponse` + `.AllowAnonymous()`. **Cart/order** thì listing bên dưới còn phản ánh milestone dev-scripts (cổng cứng `app.Run("http://localhost:<port>")` + `launchSettings.json`, `/health` inline `Results.Json(...)` — xem mục "Dựng cả cửa hàng bằng một lệnh" ở trên); **payment** khớp thực tế. Bảng tiêu chí health/identity bên dưới lập từ milestone trước — số dòng của Catalog đã cập nhật theo listing mới (UseUrls nay ở `Program.cs:9`).
 
 Toàn bộ nội dung thực, kèm số dòng, của các file quyết định — cho **cả 4** service.
 
@@ -84,16 +84,26 @@ Toàn bộ nội dung thực, kèm số dòng, của các file quyết định �
  5  var config = Config.Load(defaultPort: 5001, defaultName: "catalog");
  6
  7  var builder = WebApplication.CreateBuilder(args);
- 8  builder.WebHost.UseUrls($"http://localhost:{config.Port}");
- 9  var app = builder.Build();
-10
-11  // Liveness probe: không xác thực, không tác dụng phụ, đăng ký trước UseAuthentication (nếu milestone sau thêm auth).
-12  app.MapGet("/health", () => Results.Ok(HealthResponse.Ok(config.ServiceName)))
-13     .AllowAnonymous();
-14  app.MapGet("/products", () => new[] { new { id = "sku-1", title = "Starter Mug", priceCents = 1200 } });
+ 8  // Bind 0.0.0.0 để container reachable qua -p; cổng lấy từ env (config.Port).
+ 9  builder.WebHost.UseUrls($"http://0.0.0.0:{config.Port}");
+10  var app = builder.Build();
+11
+12  // Liveness probe: không xác thực, không tác dụng phụ, đăng ký trước UseAuthentication (nếu milestone sau thêm auth).
+13  app.MapGet("/health", () => Results.Ok(HealthResponse.Ok(config.ServiceName)))
+14     .AllowAnonymous();
 15
-16  Console.WriteLine($"[{config.ServiceName}] listening on :{config.Port}");
-17  app.Run();
+16  // Danh sách sản phẩm đã seed — shape { items, total }.
+17  var products = new[]
+18  {
+19      new { id = "sku-001", title = "Starter Mug", priceCents = 1200 },
+20      new { id = "sku-002", title = "Field Notebook", priceCents = 800 },
+21      new { id = "sku-003", title = "Enamel Pin", priceCents = 500 },
+22  };
+23  app.MapGet("/products", () => new { items = products, total = products.Length });
+24
+25  Console.WriteLine($"[{config.ServiceName}] listening on :{config.Port}");
+26  Console.WriteLine($"[{config.ServiceName}] catalog db = {config.DatabaseUrl}");
+27  app.Run();
 ```
 
 ### `services/Cart/Program.cs`
@@ -207,7 +217,7 @@ Toàn bộ nội dung thực, kèm số dòng, của các file quyết định �
 ```csharp
  1  namespace Catalog;
  2
- 3  public record ServiceConfig(int Port, string ServiceName);
+ 3  public record ServiceConfig(int Port, string ServiceName, string DatabaseUrl);
  4
  5  public static class Config
  6  {
@@ -218,9 +228,12 @@ Toàn bộ nội dung thực, kèm số dòng, của các file quyết định �
 11          if (!string.IsNullOrEmpty(rawPort) && !int.TryParse(rawPort, out port))
 12              throw new InvalidOperationException($"Invalid PORT=\"{rawPort}\": expected a number");
 13          var name = Environment.GetEnvironmentVariable("SERVICE_NAME") ?? defaultName;
-14          return new ServiceConfig(port, name);
-15      }
-16  }
+14          // URL DB catalog được TIÊM lúc chạy (từ env), không bao giờ nướng vào image.
+15          var databaseUrl = Environment.GetEnvironmentVariable("CATALOG_DATABASE_URL")
+16                            ?? "postgres://localhost:5432/catalog";
+17          return new ServiceConfig(port, name, databaseUrl);
+18      }
+19  }
 ```
 
 ### `services/Cart/Config.cs`
@@ -320,22 +333,22 @@ Toàn bộ nội dung thực, kèm số dòng, của các file quyết định �
 | Entrypoint riêng, boot trên port riêng | `Program.cs` | `Program.cs` | `Program.cs` | `Program.cs` |
 | Identity đọc từ env, không hardcode | `Config.cs:13` (`SERVICE_NAME`) | `Config.cs:13` | `Program.cs:6` (`SERVICE_NAME`) | `Program.cs:6` |
 | Default khi thiếu `SERVICE_NAME` | `Config.cs:13` `?? defaultName` | `Config.cs:13` | `Program.cs:6` `?? "order"` | `Program.cs:6` `?? "payment"` |
-| `GET /health` dùng record `HealthResponse.Ok(...)` | `Program.cs:12` | `Program.cs:14` | `Program.cs:9` | `Program.cs:9` |
+| `GET /health` dùng record `HealthResponse.Ok(...)` | `Program.cs:13` | `Program.cs:14` | `Program.cs:9` | `Program.cs:9` |
 | `HealthResponse` là bản riêng của service (không project chung) | `HealthResponse.cs` (`namespace Catalog;`) | `HealthResponse.cs` (`namespace Cart;`) | `HealthResponse.cs` (global) | `HealthResponse.cs` (global) |
 | Cùng JSON shape `{"service":...,"status":"ok"}` | dòng log Test 1 dưới | dòng log Test 1 | dòng log Test 1 | dòng log Test 1 |
 | `.csproj` riêng, `Sdk.Web` + `net10.0`, không `ProjectReference` chéo | `Catalog.csproj:1,4` | `Cart.csproj:1,4` | `order.csproj:1,4` | `payment.csproj:1,4` |
 | Solution tham chiếu project riêng | `starci-shop.slnx:4` | `starci-shop.slnx:3` | `starci-shop.slnx:5` | `starci-shop.slnx:6` |
-| `/health` unauthenticated, side-effect free | `Program.cs:12-13` (`AllowAnonymous`) | `Program.cs:14-15` (`AllowAnonymous`) | `Program.cs:9-10` (`AllowAnonymous`) | `Program.cs:9-10` (`AllowAnonymous`) |
+| `/health` unauthenticated, side-effect free | `Program.cs:13-14` (`AllowAnonymous`) | `Program.cs:14-15` (`AllowAnonymous`) | `Program.cs:9-10` (`AllowAnonymous`) | `Program.cs:9-10` (`AllowAnonymous`) |
 
 Catalog/Cart riêng có thêm (đã xác lập từ milestone trước, không đổi ở đây):
 
 | Tiêu chí | Catalog | Cart |
 | --- | --- | --- |
 | Gọi `Config.Load(...)` với default riêng | `Program.cs:5` (`5001`/`catalog`) | `Program.cs:5` (`5002`/`cart`) |
-| `config.Port` → `UseUrls` (không literal cứng) | `Program.cs:8` | `Program.cs:8` |
+| `config.Port` → `UseUrls` (không literal cứng) | `Program.cs:9` (bind `0.0.0.0`) | `Program.cs:8` |
 | Ném lỗi khi PORT malformed | `Config.cs:11-12` | `Config.cs:11-12` |
 
-Số `5001`/`5002` chỉ xuất hiện tại `Program.cs:5` (tham số `defaultPort`), **không** trong `UseUrls` (`Program.cs:8` chỉ dùng biến `{config.Port}`).
+Số `5001`/`5002` chỉ xuất hiện tại `Program.cs:5` (tham số `defaultPort`), **không** trong `UseUrls` (Catalog `Program.cs:9` bind `0.0.0.0`, Cart `Program.cs:8` — chỉ dùng biến `{config.Port}`).
 
 ## Transcript chạy thật (.NET SDK 10.0.301)
 
