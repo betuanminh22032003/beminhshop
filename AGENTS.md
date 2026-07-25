@@ -18,7 +18,7 @@ scripts/                 # dev.sh (dựng Catalog+Cart+order cùng lúc), health
 services/
   Catalog/               # sản phẩm         (:5001 mặc định — PORT/SERVICE_NAME/DATABASE_URL từ env, Dockerized, /products đọc Postgres)
   Cart/                  # giỏ hàng         (:5002 mặc định — PORT/SERVICE_NAME/CATALOG_URL từ env, Dockerized)
-  order/                 # đơn hàng         (:5003 mặc định — PORT/SERVICE_NAME/CATALOG_URL/CART_URL từ env, Dockerized)
+  order/                 # đơn hàng         (:5003 mặc định — PORT/SERVICE_NAME/CATALOG_URL/CART_URL/DATABASE_URL từ env, Dockerized, /health ping DB thật + HEALTHCHECK)
   payment/               # thanh toán       (http://localhost:5004, launchSettings — chưa đổi milestone này)
 ```
 
@@ -31,6 +31,8 @@ Mỗi service: một `.csproj` (`Microsoft.NET.Sdk.Web`, `net10.0`) + `Program.c
 - **Địa chỉ phụ thuộc luôn từ env, không hardcode host service khác:** Catalog `DATABASE_URL` (hoặc `CATALOG_DATABASE_URL` — ưu tiên cao hơn), Cart `CATALOG_URL`, order `CATALOG_URL`+`CART_URL`. Trong compose các giá trị này là **DNS theo tên service** (`db`, `catalog`, `cart`), ngoài compose default về localhost.
 - **payment** (chưa đổi): `SERVICE_NAME` env + record `HealthResponse` + launchSettings 5004, cổng chưa env-driven, chưa có Dockerfile.
 - **`scripts/health.csx` probe `127.0.0.1`, KHÔNG `localhost`** — service bind `0.0.0.0` (IPv4) còn `localhost` trên Windows phân giải `::1` trước → HttpClient treo tới timeout dù service vẫn sống.
+
+**`/health` của order là READINESS thật, ba service kia là liveness** (milestone healthcheck): order chạy `SELECT 1` tới Postgres mỗi lần được gọi (`services/order/DatabaseProbe.cs`) → DB sống trả `200 {"service":"order","status":"ok"}`, DB chết trả **`503 {"service":"order","status":"unhealthy","error":...}`**. `services/order/Dockerfile` có `HEALTHCHECK` (dạng **shell** để `${PORT:-3003}` nở lúc chạy) dùng `curl -fsS` thăm dò chính endpoint đó, nên `docker compose ps` chỉ báo order `(healthy)` khi nó thật sự nối được DB. **ĐỪNG đổi handler này về `ok` cứng** — đó là toàn bộ điểm của milestone; một 200 giả làm orchestrator đẩy checkout vào service không có DB. Hệ quả cần biết: chạy `bash scripts/dev.sh` **không có Postgres** thì `health.csx` báo **ERR cho order** — hành vi đúng, không phải hồi quy; muốn xanh thì `docker compose up -d db` trước hoặc trỏ `ORDER_DATABASE_URL`. `curl` là thứ duy nhất cài thêm vào tầng runtime của order (trước `USER app`, vì apt cần root).
 
 **Catalog và Postgres:** `/products` đọc bảng `products` trong Postgres qua `Npgsql` (ADO thuần, **không** EF Core) — xem `services/Catalog/ProductStore.cs`. Seed chỉ chạy khi bảng còn rỗng, nên dữ liệu sống qua `docker compose down && up` (named volume `pgdata`). Không có DB (chạy `bash scripts/dev.sh` ngoài Docker) thì store retry 5 lần rồi **fallback seed in-memory** để service vẫn boot — log ghi rõ `products source = postgres | in-memory seed`. Npgsql là NuGet duy nhất được thêm, và chỉ trong `Catalog.csproj`.
 
@@ -57,7 +59,9 @@ docker run -d -p 3001:3001 -e PORT=3001 -e CATALOG_DATABASE_URL=... starci-shop/
 
 cp .env.example .env                          # BẮT BUỘC trước lần compose đầu (secret Postgres, .env gitignored)
 docker compose up --build -d                  # CẢ SHOP 1 lệnh: db + catalog:3001 + cart:3002 + order:3003
-docker compose ps                             # db "healthy", ba service "Up"
+docker compose ps                             # db "healthy" TRƯỚC, order "Up (healthy)" (HEALTHCHECK trong image)
+curl -s localhost:3003/health                 # {"service":"order","status":"ok"} — chạy SELECT 1 tới Postgres
+docker compose stop db && curl -s -o /dev/null -w '%{http_code}' localhost:3003/health  # 503, không phải 200 giả
 docker compose exec catalog getent hosts db   # DNS theo tên service (172.x db) — không localhost, không IP cứng
 docker compose down                           # KHÔNG dùng `down -v`: -v xoá volume pgdata = mất dữ liệu seed
 ```
@@ -68,7 +72,7 @@ Chạy dotnet ở **gốc repo** khi build/thao tác solution. **Catalog/Cart/or
 
 ## Quy ước khi sửa code
 
-- Ngoài ASP.NET Core minimal API, thư viện duy nhất đã chốt là **`Npgsql` trong `Catalog.csproj`** (milestone compose cần Catalog đọc Postgres thật). Đừng tự ý thêm EF Core, Dapper, MediatR, AutoMapper... nếu task không yêu cầu — và nếu cần truy cập DB ở service khác thì khai `Npgsql` trong `.csproj` của **chính** service đó.
+- Ngoài ASP.NET Core minimal API, thư viện duy nhất đã chốt là **`Npgsql`** — khai trong `Catalog.csproj` (đọc bảng `products`) và `order.csproj` (readiness probe `SELECT 1`), **cùng version `10.0.3`**, ADO thuần. Đừng tự ý thêm EF Core, Dapper, MediatR, AutoMapper... nếu task không yêu cầu — và nếu cần truy cập DB ở service khác thì khai `Npgsql` trong `.csproj` của **chính** service đó. Việc order **copy** hàm `ToConnectionString` thay vì tái dùng của Catalog là CỐ Ý: service không `ProjectReference` sang service khác, và đây là plumbing hạ tầng chứ không phải contract nên cũng không thuộc `Shop.Contracts`.
 - NuGet package mới khai báo trong `.csproj` **của service dùng nó**, không khai ở solution hay project khác.
 - Kiểu dùng chung xuyên service (value type domain) đặt trong `packages/Shop.Contracts` và service tham chiếu qua `<ProjectReference>` — KHÔNG copy-paste một bản riêng vào service (làm vậy là quay lại drift mà library này xoá bỏ). `Shop.Contracts` chỉ chứa record/enum thuần.
 - Sửa xong phải chứng minh: `dotnet build` (hoặc build riêng service bị sửa) thành công + `dotnet sln list` vẫn đủ 5 project (4 service + Shop.Contracts). Với thay đổi runtime behavior (endpoint, config), chạy thật service (`dotnet run`) và gọi endpoint bằng `curl` — build/typecheck không xác nhận được hành vi lúc chạy.

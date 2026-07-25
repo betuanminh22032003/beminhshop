@@ -24,10 +24,13 @@ services:
       - shopnet
     healthcheck:
       # depends_on: service_healthy của app dựa vào chính healthcheck này.
+      # pg_isready chỉ thoát 0 khi Postgres ĐÃ nhận kết nối — đó là điều kiện chặn thật.
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 5s
       timeout: 3s
       retries: 10
+      # Vài giây đầu Postgres còn initdb: đừng tính là lần retry thất bại.
+      start_period: 10s
 
   catalog:
     build:
@@ -74,6 +77,10 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:${POSTGRES_PORT}/${POSTGRES_DB}
       CATALOG_URL: http://catalog:3001
       CART_URL: http://cart:3002
+    # order KHÔNG được khởi động cho tới khi db báo healthy — nhờ vậy kết nối Npgsql
+    # đầu tiên không còn gặp "Connection refused" ở lần `up` từ trạng thái sạch.
+    # Trạng thái healthy của chính order do HEALTHCHECK trong image quyết định
+    # (services/order/Dockerfile: curl /health -> SELECT 1 tới Postgres).
     depends_on:
       db:
         condition: service_healthy

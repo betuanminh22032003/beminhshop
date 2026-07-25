@@ -39,14 +39,17 @@ Lệnh gốc `bash scripts/dev.sh` khởi động Catalog(5001) + Cart(5002) + o
 Chứng minh cả đội xanh: `dotnet script scripts/health.csx` gọi `/health` từng cổng, in `OK`/`ERR` mỗi service, `ALL GREEN`/`SOME RED`, thoát mã 0 nếu tất cả xanh — khác 0 nếu có cái down.
 
 Cả 4 service trả cùng shape JSON `{"service":"<tên>","status":"ok"}`, nhưng khác cơ chế:
-- **Catalog/Cart/order:** cổng từ `PORT` env (mặc định 5001/5002/5003), bind `0.0.0.0` qua `UseUrls` để container reachable qua `-p`; identity từ `SERVICE_NAME`. Catalog dùng record `HealthResponse.Ok(config.ServiceName)`; Cart/order dùng `Results.Json(new { service = <từ env>, status = "ok" })` — cùng shape.
+- **Catalog/Cart/order:** cổng từ `PORT` env (mặc định 5001/5002/5003), bind `0.0.0.0` qua `UseUrls` để container reachable qua `-p`; identity từ `SERVICE_NAME`. Catalog dùng record `HealthResponse.Ok(config.ServiceName)`; Cart dùng `Results.Json(new { service = <từ env>, status = "ok" })` — cùng shape.
+- **order là NGOẠI LỆ — `/health` của nó là readiness THẬT, không phải liveness:** mỗi lần gọi chạy một `SELECT 1` tới Postgres qua `DatabaseProbe`. DB sống → `200 {"service":"order","status":"ok"}`; DB chết → **`503 {"service":"order","status":"unhealthy","error":...}`**. Docker `HEALTHCHECK` trong `services/order/Dockerfile` thăm dò chính endpoint này, nên `order` chỉ "healthy" khi thực sự nói chuyện được với DB — một `200` cứng sẽ khiến orchestrator đẩy lưu lượng checkout vào service không có DB.
 - **payment:** CHƯA đổi — record `HealthResponse.Ok(serviceName)` với `serviceName` từ `SERVICE_NAME` env, `.AllowAnonymous()`, cổng theo `launchSettings.json` (5004).
 
 **Windows caveat:** trap `kill ${pids[*]}` trong dev.sh chỉ hạ subshell; tiến trình `dotnet` cháu bị mồ côi vẫn giữ cổng — dọn bằng `taskkill //F //PID <pid>`.
 
 **`health.csx` gọi `127.0.0.1`, không `localhost`:** ba service bind `0.0.0.0` (IPv4); `localhost` trên Windows phân giải `::1` trước nên `HttpClient` treo tới timeout dù service vẫn sống (`curl` không bị vì tự fallback sang IPv4).
 
-Ngoài Docker (dev.sh) không có Postgres — Catalog retry 5 lần rồi phục vụ **seed in-memory** và ghi rõ trong log `[catalog] products source = in-memory seed`, nên `dev.sh` + `health.csx` vẫn xanh như trước.
+Ngoài Docker (dev.sh) không có Postgres — Catalog retry 5 lần rồi phục vụ **seed in-memory** và ghi rõ trong log `[catalog] products source = in-memory seed`, nên Catalog vẫn xanh.
+
+⚠️ **Nhưng order thì KHÔNG có fallback:** `/health` của order phải ping DB thật, nên chạy `dev.sh` mà không có Postgres → `health.csx` báo **ERR cho order** (503). Đó là hành vi ĐÚNG, không phải hồi quy: order không có DB thì không sẵn sàng nhận checkout. Muốn cả đội xanh ngoài Docker thì dựng Postgres trước (`docker compose up -d db`) hoặc trỏ `ORDER_DATABASE_URL` sang một Postgres đang chạy.
 
 ## Lệnh
 
@@ -123,7 +126,7 @@ Bốn tính chất của stack này:
 1. **Secret không nằm trong file compose.** Mọi `${POSTGRES_*}` được compose nạp từ `.env` (gitignored); `.env.example` là bản mẫu placeholder được commit để hợp đồng cấu hình vẫn hiện rõ. `.gitignore` có `.env` + `.env.*` và `!.env.example`.
 2. **DNS theo tên service, không `localhost`, không IP cứng.** Cả bốn nằm trên mạng `shopnet` (`driver: bridge`, do người dùng định nghĩa — bridge mặc định KHÔNG phân giải tên). Catalog nối DB qua `postgres://…@db:5432/…`; `cart` gọi `http://catalog:3001`; `order` gọi cả `http://catalog:3001` và `http://cart:3002`. Toàn bộ tiêm bằng env (`DATABASE_URL`, `CATALOG_URL`, `CART_URL`), không hardcode.
 3. **Dữ liệu bền bỉ.** `pgdata` là named volume mount vào `/var/lib/postgresql/data`; Catalog seed sản phẩm **chỉ khi bảng `products` còn rỗng**, nên `docker compose down` (KHÔNG `-v`) rồi `up` lại vẫn thấy đúng dữ liệu cũ.
-4. **App chờ DB thật sự sẵn sàng.** `db` có `healthcheck` bằng `pg_isready`; ba service khai `depends_on: db: condition: service_healthy`.
+4. **App chờ DB thật sự sẵn sàng.** `db` có `healthcheck` bằng `pg_isready`; ba service khai `depends_on: db: condition: service_healthy`. Chi tiết cơ chế chặn + probe thật của order: [mục dưới](#healthcheck--chặn-khởi-động-milestone-healthcheck).
 
 Mỗi service build từ Dockerfile riêng (`/Dockerfile`, `services/Cart/Dockerfile`, `services/order/Dockerfile`) nhưng **`context: .` = gốc repo**, vì cả ba tham chiếu `packages/Shop.Contracts`.
 
@@ -179,6 +182,66 @@ $ docker logs petproject-catalog-1 | grep catalog\]
 Dòng `products already in db (3 rows) — skipping seed` là bằng chứng mạnh nhất: seed bị bỏ qua mà `/products` vẫn có dữ liệu ⇒ dữ liệu đến từ `pgdata`, không phải từ code. Kiểm chứng chặt hơn nữa: `UPDATE products SET title='Starter Mug (persisted)' WHERE id='sku-001'` trước khi `down`, sau `up` `curl` vẫn trả `Starter Mug (persisted)` — đã chạy thật, đúng như vậy.
 
 > Npgsql in một dòng `Cannot load library libgssapi_krb5.so.2` lúc khởi tạo trên image `aspnet` (probe Kerberos/GSSAPI không có sẵn). Vô hại: kết nối vẫn đi bằng password auth — log ngay sau đó là `seeded 3 products into db` / `products source = postgres`.
+
+## Healthcheck & chặn khởi động (milestone healthcheck)
+
+Vấn đề: `docker compose up` bật Postgres và order **cùng lúc**, nhưng Postgres cần vài giây mới nhận kết nối TCP — order mở kết nối Npgsql ngay và chết với `Connection refused`. Ba lớp phối hợp để lần khởi động nguội luôn xanh:
+
+| Lớp | Ở đâu | Nói lên điều gì |
+|---|---|---|
+| `pg_isready` | `docker-compose.yaml` → `db.healthcheck` | Postgres ĐÃ nhận kết nối (không chỉ "container đang chạy") |
+| `depends_on: condition: service_healthy` | `docker-compose.yaml` → `catalog`/`cart`/`order` | App **không được khởi động** cho tới khi `db` healthy |
+| `HEALTHCHECK` + `/health` chạy `SELECT 1` | `services/order/Dockerfile` + `services/order/Program.cs` | order thực sự **nói chuyện được với DB**, không phải chỉ còn sống |
+
+Điểm cốt lõi: `/health` của order **không** trả `ok` cứng. Nó gọi `DatabaseProbe.PingAsync()` → `SELECT 1` round-trip tới Postgres; ném lỗi thì handler đổi thành **503**. `HEALTHCHECK` dùng `curl -fsS` nên HTTP ≥ 400 làm curl thoát khác 0 ⇒ Docker đánh dấu container `unhealthy`. Dạng **shell** (không phải exec) để `${PORT:-3003}` nở lúc chạy — cổng vẫn do env quyết định, không nướng vào image. `curl` là công cụ duy nhất thêm vào tầng runtime, cài trước `USER app` (apt cần root).
+
+### Kiểm chứng chạy thật (Docker 29.2.1)
+
+```bash
+# 1) Cơ chế chặn: db phải Healthy TRƯỚC, chỉ khi đó order mới Starting
+#    (chạy từ trạng thái SẠCH THẬT: `docker compose down -v` đã xoá volume pgdata,
+#     nên Postgres phải initdb lại từ đầu — đúng tình huống hay gây Connection refused)
+$ docker compose down -v && docker compose up -d
+ Container petproject-db-1 Starting
+ Container petproject-db-1 Started
+ Container petproject-db-1 Waiting          # <- compose chặn ở đây
+ Container petproject-db-1 Healthy
+ Container petproject-order-1 Starting      # <- chỉ sau khi db healthy
+ Container petproject-order-1 Started
+
+$ docker compose ps
+petproject-db-1     Up 24 seconds (healthy)
+petproject-order-1  Up 18 seconds (healthy)   # order tự healthy nhờ HEALTHCHECK trong image
+
+$ docker compose logs order | grep -ci "connection refused"
+0                                            # KHÔNG còn connection refused
+
+$ curl -s localhost:3001/products            # DB sạch -> Catalog seed lại, stack xanh hết
+{"items":[{"id":"sku-001",...},{"id":"sku-002",...},{"id":"sku-003",...}],"total":3}
+
+# 2) Probe khi DB sống
+$ curl -s -w '\nHTTP %{http_code}\n' localhost:3003/health
+{"service":"order","status":"ok"}
+HTTP 200
+
+# 3) Probe LÀ THẬT, không phải 200 giả — hạ DB rồi gọi lại
+$ docker compose stop db && curl -s -w '\nHTTP %{http_code}\n' localhost:3003/health
+{"service":"order","status":"unhealthy","error":"57P01: terminating connection due to administrator command"}
+HTTP 503
+
+$ docker inspect --format '{{.State.Health.Status}}' petproject-order-1
+unhealthy                                    # Docker cũng thấy, không chỉ curl
+$ docker inspect --format '{{range .State.Health.Log}}exit={{.ExitCode}} {{.Output}}{{end}}' petproject-order-1
+exit=1 curl: (22) The requested URL returned error: 503
+
+# 4) Tự phục hồi khi DB trở lại
+$ docker compose start db && curl -s localhost:3003/health
+{"service":"order","status":"ok"}
+$ docker inspect --format '{{.State.Health.Status}}' petproject-order-1
+healthy
+```
+
+Cổng ở đây là **3003** (quy ước đã chốt của repo từ milestone compose: catalog 3001 / cart 3002 / order 3003), không phải `8080` như ví dụ trong đề — cơ chế giống hệt, chỉ khác con số, và số đó đến từ env `PORT` nên đổi được mà không sửa image.
 
 ---
 
@@ -262,29 +325,55 @@ Toàn bộ nội dung thực, kèm số dòng, của các file quyết định �
  1  // order: sở hữu việc biến giỏ hàng thành đơn đã đặt và theo dõi vòng đời của đơn.
  2  // KHÔNG thu tiền thẻ.
  3  var serviceName = Environment.GetEnvironmentVariable("SERVICE_NAME") ?? "order";
- 4
+ 4  
  5  var rawPort = Environment.GetEnvironmentVariable("PORT");
  6  int port = 5003;
  7  if (!string.IsNullOrEmpty(rawPort) && !int.TryParse(rawPort, out port))
  8      throw new InvalidOperationException($"Invalid PORT=\"{rawPort}\": expected a number");
- 9
+ 9  
 10  // Địa chỉ service anh em TIÊM lúc chạy: trong compose là DNS theo tên service
 11  // (http://catalog:3001, http://cart:3002), ngoài compose mặc định localhost. Không hardcode.
 12  var catalogUrl = Environment.GetEnvironmentVariable("CATALOG_URL") ?? "http://localhost:5001";
 13  var cartUrl = Environment.GetEnvironmentVariable("CART_URL") ?? "http://localhost:5002";
-14
-15  var builder = WebApplication.CreateBuilder(args);
-16  // Bind 0.0.0.0 để container reachable qua -p; cổng lấy từ env PORT (mặc định 5003).
-17  builder.WebHost.UseUrls($"http://0.0.0.0:{port}");
-18  var app = builder.Build();
-19
-20  // /health: shape cố định { service, status } cho probe gốc (scripts/health.csx).
-21  app.MapGet("/health", () => Results.Json(new { service = serviceName, status = "ok" }));
-22
-23  Console.WriteLine($"[{serviceName}] listening on :{port}");
-24  Console.WriteLine($"[{serviceName}] catalog url = {catalogUrl}");
-25  Console.WriteLine($"[{serviceName}] cart url = {cartUrl}");
-26  app.Run();
+14  
+15  // Địa chỉ Postgres cũng từ env: ORDER_DATABASE_URL ưu tiên hơn DATABASE_URL chung của
+16  // compose (host là TÊN SERVICE "db"), ngoài compose mặc định localhost.
+17  var databaseUrl = Environment.GetEnvironmentVariable("ORDER_DATABASE_URL")
+18      ?? Environment.GetEnvironmentVariable("DATABASE_URL")
+19      ?? "postgres://shop:shop@localhost:5432/shop";
+20  
+21  var builder = WebApplication.CreateBuilder(args);
+22  // Bind 0.0.0.0 để container reachable qua -p; cổng lấy từ env PORT (mặc định 5003).
+23  builder.WebHost.UseUrls($"http://0.0.0.0:{port}");
+24  var app = builder.Build();
+25  
+26  await using var probe = new DatabaseProbe(databaseUrl);
+27  
+28  // /health là readiness THẬT: mỗi lần gọi là một round-trip `SELECT 1` tới Postgres.
+29  // DB sống  -> 200 {"service":"order","status":"ok"}
+30  // DB chết  -> 503 {"service":"order","status":"unhealthy","error":...}
+31  // Docker HEALTHCHECK và depends_on: condition: service_healthy dựa vào chính chỗ này,
+32  // nên KHÔNG được trả "ok" cứng: một 200 giả làm orchestrator đẩy lưu lượng checkout
+33  // vào service không có DB.
+34  app.MapGet("/health", async (CancellationToken ct) =>
+35  {
+36      try
+37      {
+38          await probe.PingAsync(ct);
+39          return Results.Json(HealthResponse.Ok(serviceName));
+40      }
+41      catch (Exception ex)
+42      {
+43          return Results.Json(HealthResponse.Unhealthy(serviceName, ex.Message), statusCode: 503);
+44      }
+45  });
+46  
+47  Console.WriteLine($"[{serviceName}] listening on :{port}");
+48  Console.WriteLine($"[{serviceName}] catalog url = {catalogUrl}");
+49  Console.WriteLine($"[{serviceName}] cart url = {cartUrl}");
+50  // KHÔNG in databaseUrl: chuỗi có password.
+51  Console.WriteLine($"[{serviceName}] health probe = SELECT 1 on postgres");
+52  app.Run();
 ```
 
 ### `services/payment/Program.cs`
@@ -329,10 +418,22 @@ Toàn bộ nội dung thực, kèm số dòng, của các file quyết định �
 ### `services/order/HealthResponse.cs`
 
 ```csharp
-1  record HealthResponse(string Service, string Status)
-2  {
-3      public static HealthResponse Ok(string service) => new(service, "ok");
-4  }
+ 1  using System.Text.Json.Serialization;
+ 2  
+ 3  // Shape liveness/readiness của riêng order: { service, status } khi khoẻ, thêm { error }
+ 4  // khi không. Error bị bỏ khỏi JSON lúc null nên bản "ok" giữ đúng hợp đồng cũ
+ 5  // {"service":"order","status":"ok"}.
+ 6  record HealthResponse(
+ 7      string Service,
+ 8      string Status,
+ 9      [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Error = null)
+10  {
+11      public static HealthResponse Ok(string service) => new(service, "ok");
+12  
+13      /// <summary>DB không với tới được → 503, nói rõ lý do thay vì 200 giả.</summary>
+14      public static HealthResponse Unhealthy(string service, string error) =>
+15          new(service, "unhealthy", error);
+16  }
 ```
 
 ### `services/payment/HealthResponse.cs`
@@ -344,7 +445,80 @@ Toàn bộ nội dung thực, kèm số dòng, của các file quyết định �
 4  }
 ```
 
-`order`/`payment` chưa dùng namespace riêng ở milestone này (chưa nâng cấp lên pattern `Config.cs` như Catalog/Cart) — record ở global namespace, cùng nội dung `Service`/`Status`/`Ok(...)` như hai service kia. Không project nào tham chiếu record của service khác — 4 định nghĩa độc lập, trùng shape.
+`order`/`payment` chưa dùng namespace riêng ở milestone này (chưa nâng cấp lên pattern `Config.cs` như Catalog/Cart) — record ở global namespace. Không project nào tham chiếu record của service khác — 4 định nghĩa độc lập.
+
+**order đã tách khỏi shape chung** ở milestone healthcheck: nó thêm `Error` (bỏ khỏi JSON khi null nên bản "ok" vẫn đúng hợp đồng cũ) và factory `Unhealthy(...)` cho nhánh 503. Đó chính là lý do `HealthResponse` là **4 file riêng** thay vì một record trong `Shop.Contracts`: shape liveness/readiness là việc nội bộ mỗi service, và order vừa chứng minh nó tiến hoá độc lập được mà không làm vỡ ba service kia.
+
+### `services/order/DatabaseProbe.cs`
+
+```csharp
+ 1  using Npgsql;
+ 2  
+ 3  /// <summary>
+ 4  /// Cầu nối order → Postgres, CHỈ dùng cho readiness probe: mở kết nối thật và chạy
+ 5  /// `SELECT 1`. Không truy vấn nghiệp vụ nào ở đây — order chưa sở hữu bảng nào.
+ 6  ///
+ 7  /// Vì sao order cần thứ này: một `/health` chỉ trả "ok" cứng thì vô dụng — Docker
+ 8  /// HEALTHCHECK và `depends_on: condition: service_healthy` sẽ báo xanh cả khi DB đã
+ 9  /// chết. Probe phải đi tới DB và về mới nói được sự thật.
+10  ///
+11  /// Không tái dùng ProductStore của Catalog: service không tham chiếu project của
+12  /// service khác (luật ranh giới trong AGENTS.md) — đây là plumbing hạ tầng của order.
+13  /// </summary>
+14  public sealed class DatabaseProbe : IAsyncDisposable
+15  {
+16      private readonly NpgsqlDataSource _dataSource;
+17  
+18      public DatabaseProbe(string databaseUrl)
+19      {
+20          ConnectionString = ToConnectionString(databaseUrl);
+21          _dataSource = NpgsqlDataSource.Create(ConnectionString);
+22      }
+23  
+24      /// <summary>Connection string ADO đã chuẩn hoá (KHÔNG log — có password).</summary>
+25      public string ConnectionString { get; }
+26  
+27      /// <summary>
+28      /// Round-trip thật tới Postgres. Ném ra ngoài nếu DB không nhận kết nối, để
+29      /// handler /health đổi thành 503 thay vì che lỗi.
+30      /// </summary>
+31      public async Task PingAsync(CancellationToken cancellationToken = default)
+32      {
+33          await using var cmd = _dataSource.CreateCommand("SELECT 1");
+34          await cmd.ExecuteScalarAsync(cancellationToken);
+35      }
+36  
+37      /// <summary>
+38      /// Đổi URL kiểu `postgres://user:pass@db:5432/shop` (thứ compose tiêm vào) thành
+39      /// connection string ADO của Npgsql. Host là TÊN SERVICE trong compose ("db"), không localhost.
+40      /// </summary>
+41      public static string ToConnectionString(string databaseUrl)
+42      {
+43          if (!databaseUrl.Contains("://")) return databaseUrl; // đã là connection string sẵn
+44  
+45          var uri = new Uri(databaseUrl);
+46          var userInfo = uri.UserInfo.Split(':', 2);
+47          var builder = new NpgsqlConnectionStringBuilder
+48          {
+49              Host = uri.Host,
+50              Port = uri.IsDefaultPort ? 5432 : uri.Port,
+51              Database = uri.AbsolutePath.Trim('/'),
+52              // Probe phải thất bại NHANH: HEALTHCHECK của Docker chỉ cho 3s.
+53              Timeout = 2,
+54              CommandTimeout = 2,
+55          };
+56          if (userInfo.Length > 0 && userInfo[0].Length > 0)
+57              builder.Username = Uri.UnescapeDataString(userInfo[0]);
+58          if (userInfo.Length > 1)
+59              builder.Password = Uri.UnescapeDataString(userInfo[1]);
+60          return builder.ConnectionString;
+61      }
+62  
+63      public ValueTask DisposeAsync() => _dataSource.DisposeAsync();
+64  }
+```
+
+Plumbing hạ tầng của riêng order: đổi `postgres://…` (thứ compose tiêm) sang connection string ADO, rồi `SELECT 1`. `Timeout`/`CommandTimeout` = 2s để probe thất bại nhanh hơn hạn 3s của `HEALTHCHECK`. **Không** tái dùng `ProductStore` của Catalog — service không `ProjectReference` sang service khác; và đây là plumbing, không phải contract, nên cũng không nhét vào `Shop.Contracts`.
 
 ### `services/Catalog/Config.cs`
 
@@ -606,7 +780,7 @@ Cả shop bằng một lệnh: secret từ `.env`, DNS theo tên service trên `
  9  #   docker compose down && docker compose up (KHÔNG dùng `down -v`).
 10  # - Mỗi service build từ Dockerfile riêng nhưng context là GỐC repo, vì cả ba tham
 11  #   chiếu packages/Shop.Contracts.
-12
+12  
 13  services:
 14    db:
 15      image: postgres:16-alpine
@@ -621,72 +795,79 @@ Cả shop bằng một lệnh: secret từ `.env`, DNS theo tên service trên `
 24        - shopnet
 25      healthcheck:
 26        # depends_on: service_healthy của app dựa vào chính healthcheck này.
-27        test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
-28        interval: 5s
-29        timeout: 3s
-30        retries: 10
-31
-32    catalog:
-33      build:
-34        context: .
-35        dockerfile: Dockerfile
-36      environment:
-37        PORT: 3001
-38        SERVICE_NAME: catalog
-39        # host là "db" — tên service trong compose, do DNS của shopnet phân giải.
-40        DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:${POSTGRES_PORT}/${POSTGRES_DB}
-41      depends_on:
-42        db:
-43          condition: service_healthy
-44      ports:
-45        - "3001:3001"
-46      networks:
-47        - shopnet
-48
-49    cart:
-50      build:
-51        context: .
-52        dockerfile: services/Cart/Dockerfile
-53      environment:
-54        PORT: 3002
-55        SERVICE_NAME: cart
-56        DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:${POSTGRES_PORT}/${POSTGRES_DB}
-57        # Lưu lượng service→service cũng đi bằng DNS theo tên service.
-58        CATALOG_URL: http://catalog:3001
-59      depends_on:
-60        db:
-61          condition: service_healthy
-62      ports:
-63        - "3002:3002"
-64      networks:
-65        - shopnet
-66
-67    order:
-68      build:
-69        context: .
-70        dockerfile: services/order/Dockerfile
-71      environment:
-72        PORT: 3003
-73        SERVICE_NAME: order
-74        DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:${POSTGRES_PORT}/${POSTGRES_DB}
-75        CATALOG_URL: http://catalog:3001
-76        CART_URL: http://cart:3002
-77      depends_on:
-78        db:
-79          condition: service_healthy
-80      ports:
-81        - "3003:3003"
-82      networks:
-83        - shopnet
-84
-85  networks:
-86    # Mạng do người dùng định nghĩa = có DNS nội bộ theo tên service.
-87    shopnet:
-88      driver: bridge
-89
-90  volumes:
-91    # Khai báo một lần ở cấp cao nhất: Docker quản lý vòng đời volume độc lập với container.
-92    pgdata:
+27        # pg_isready chỉ thoát 0 khi Postgres ĐÃ nhận kết nối — đó là điều kiện chặn thật.
+28        test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+29        interval: 5s
+30        timeout: 3s
+31        retries: 10
+32        # Vài giây đầu Postgres còn initdb: đừng tính là lần retry thất bại.
+33        start_period: 10s
+34  
+35    catalog:
+36      build:
+37        context: .
+38        dockerfile: Dockerfile
+39      environment:
+40        PORT: 3001
+41        SERVICE_NAME: catalog
+42        # host là "db" — tên service trong compose, do DNS của shopnet phân giải.
+43        DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:${POSTGRES_PORT}/${POSTGRES_DB}
+44      depends_on:
+45        db:
+46          condition: service_healthy
+47      ports:
+48        - "3001:3001"
+49      networks:
+50        - shopnet
+51  
+52    cart:
+53      build:
+54        context: .
+55        dockerfile: services/Cart/Dockerfile
+56      environment:
+57        PORT: 3002
+58        SERVICE_NAME: cart
+59        DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:${POSTGRES_PORT}/${POSTGRES_DB}
+60        # Lưu lượng service→service cũng đi bằng DNS theo tên service.
+61        CATALOG_URL: http://catalog:3001
+62      depends_on:
+63        db:
+64          condition: service_healthy
+65      ports:
+66        - "3002:3002"
+67      networks:
+68        - shopnet
+69  
+70    order:
+71      build:
+72        context: .
+73        dockerfile: services/order/Dockerfile
+74      environment:
+75        PORT: 3003
+76        SERVICE_NAME: order
+77        DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:${POSTGRES_PORT}/${POSTGRES_DB}
+78        CATALOG_URL: http://catalog:3001
+79        CART_URL: http://cart:3002
+80      # order KHÔNG được khởi động cho tới khi db báo healthy — nhờ vậy kết nối Npgsql
+81      # đầu tiên không còn gặp "Connection refused" ở lần `up` từ trạng thái sạch.
+82      # Trạng thái healthy của chính order do HEALTHCHECK trong image quyết định
+83      # (services/order/Dockerfile: curl /health -> SELECT 1 tới Postgres).
+84      depends_on:
+85        db:
+86          condition: service_healthy
+87      ports:
+88        - "3003:3003"
+89      networks:
+90        - shopnet
+91  
+92  networks:
+93    # Mạng do người dùng định nghĩa = có DNS nội bộ theo tên service.
+94    shopnet:
+95      driver: bridge
+96  
+97  volumes:
+98    # Khai báo một lần ở cấp cao nhất: Docker quản lý vòng đời volume độc lập với container.
+99    pgdata:
 ```
 
 ### `.env.example`
@@ -747,34 +928,48 @@ Bản mẫu commit được. `.env` thật (cùng khoá, giá trị thật) bị
  2  # (order tham chiếu packages/Shop.Contracts):
  3  #   docker build -f services/order/Dockerfile -t starci-shop/order:slim .
  4  # docker-compose.yaml khai đúng cặp context: . / dockerfile: services/order/Dockerfile.
- 5
+ 5  
  6  # --- tầng build: full .NET SDK, restore + publish ---
  7  FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
  8  WORKDIR /src
- 9
+ 9  
 10  # Copy .csproj và restore TRƯỚC khi copy source (tận dụng layer cache).
 11  COPY packages/Shop.Contracts/Shop.Contracts.csproj packages/Shop.Contracts/
 12  COPY services/order/order.csproj services/order/
 13  RUN dotnet restore services/order/order.csproj
-14
+14  
 15  # Copy source rồi publish ra /app/publish.
 16  COPY packages/Shop.Contracts/ packages/Shop.Contracts/
 17  COPY services/order/ services/order/
 18  RUN dotnet publish services/order/order.csproj -c Release -o /app/publish --no-restore
-19
+19  
 20  # --- tầng runtime: CHỈ ASP.NET runtime, không SDK, không chạy root ---
 21  FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
 22  ENV DOTNET_RUNNING_IN_CONTAINER=true
 23  WORKDIR /app
-24
-25  # CHỈ mang sang output đã publish — toolchain build ở lại tầng builder.
-26  COPY --from=build /app/publish ./
-27
-28  # Image aspnet có sẵn user không phải root tên "app".
-29  USER app
-30  EXPOSE 3003
-31  # PORT / CATALOG_URL / CART_URL / DATABASE_URL đọc từ env lúc chạy (không nướng vào image).
-32  ENTRYPOINT ["dotnet", "order.dll"]
+24  
+25  # curl là công cụ DUY NHẤT thêm vào runtime, để HEALTHCHECK tự thăm dò /health được.
+26  # Cài trước khi hạ quyền (apt cần root), rồi dọn apt lists cho image gọn.
+27  RUN apt-get update \
+28      && apt-get install -y --no-install-recommends curl \
+29      && rm -rf /var/lib/apt/lists/*
+30  
+31  # CHỈ mang sang output đã publish — toolchain build ở lại tầng builder.
+32  COPY --from=build /app/publish ./
+33  
+34  # Image aspnet có sẵn user không phải root tên "app".
+35  USER app
+36  EXPOSE 3003
+37  # PORT / CATALOG_URL / CART_URL / DATABASE_URL đọc từ env lúc chạy (không nướng vào image).
+38  
+39  # Container tự thăm dò /health — endpoint đó chạy `SELECT 1` thật tới Postgres, nên
+40  # "healthy" ở đây nghĩa là order THỰC SỰ nói chuyện được với DB, không chỉ còn sống.
+41  # Dạng shell (không phải exec) để ${PORT} nở lúc chạy — cổng vẫn do env quyết định.
+42  # curl -f thoát khác 0 khi HTTP >= 400, nên 503 lập tức thành "unhealthy".
+43  HEALTHCHECK --interval=10s --timeout=3s --retries=5 --start-period=20s \
+44      CMD curl -fsS "http://localhost:${PORT:-3003}/health" || exit 1
+45  
+46  ENTRYPOINT ["dotnet", "order.dll"]
 ```
 
 ### `services/Cart/Cart.csproj`
@@ -802,7 +997,7 @@ Bản mẫu commit được. `.env` thật (cùng khoá, giá trị thật) bị
 
 ```xml
  1  <Project Sdk="Microsoft.NET.Sdk.Web">
- 2
+ 2  
  3    <PropertyGroup>
  4      <TargetFramework>net10.0</TargetFramework>
  5      <Nullable>enable</Nullable>
@@ -811,12 +1006,17 @@ Bản mẫu commit được. `.env` thật (cùng khoá, giá trị thật) bị
  8           không phụ thuộc casing thư mục (NTFS case-insensitive). -->
  9      <AssemblyName>order</AssemblyName>
 10    </PropertyGroup>
-11
+11  
 12    <ItemGroup>
-13      <ProjectReference Include="..\..\packages\Shop.Contracts\Shop.Contracts.csproj" />
-14    </ItemGroup>
-15
-16  </Project>
+13      <!-- ADO thuần, không EF Core: order chỉ cần ping DB (`SELECT 1`) cho readiness probe. -->
+14      <PackageReference Include="Npgsql" Version="10.0.3" />
+15    </ItemGroup>
+16  
+17    <ItemGroup>
+18      <ProjectReference Include="..\..\packages\Shop.Contracts\Shop.Contracts.csproj" />
+19    </ItemGroup>
+20  
+21  </Project>
 ```
 
 ### `services/payment/payment.csproj`
