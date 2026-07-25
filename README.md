@@ -21,11 +21,13 @@ packages/
 scripts/
   dev.sh                       # LỆNH GỐC (không Docker): dựng Catalog+Cart+order cùng lúc
   health.csx                   # probe /health cả đội (dotnet script), gọi 127.0.0.1
+  build-images.sh              # PHÁT HÀNH: build cả 4 image, tag = git SHA ngắn, revision trong OCI label
 services/
   Catalog/  Catalog.csproj  Program.cs  Config.cs  ProductStore.cs  HealthResponse.cs  PriceQuote.cs   (env-driven, Dockerized ở /Dockerfile, /products đọc Postgres)
   Cart/     Cart.csproj     Program.cs  Config.cs  Dockerfile  Properties/launchSettings.json  CartLine.cs  HealthResponse.cs   (env-driven, Dockerized)
-  order/    order.csproj    Program.cs  Dockerfile  Properties/launchSettings.json  Order.cs  HealthResponse.cs   (env-driven inline, Dockerized)
-  payment/  payment.csproj  Program.cs  Properties/launchSettings.json  HealthResponse.cs   (CHƯA đổi: cổng cứng theo launchSettings, chưa có Dockerfile)
+  order/    order.csproj    Program.cs  DatabaseProbe.cs  Dockerfile  Properties/launchSettings.json  Order.cs  HealthResponse.cs   (env-driven inline, Dockerized, /health ping DB thật)
+  payment/  payment.csproj  Program.cs  Dockerfile  Properties/launchSettings.json  HealthResponse.cs   (env-driven + Dockerized từ milestone image tái lập được)
+  <mỗi service>/packages.lock.json   # lockfile NuGet ĐƯỢC COMMIT — Docker restore ở --locked-mode
 ```
 
 Mỗi service một `.csproj` riêng (`Microsoft.NET.Sdk.Web`, `net10.0`), build và chạy độc lập, KHÔNG `ProjectReference` sang service khác — nhưng có tham chiếu `packages/Shop.Contracts` (class library `Microsoft.NET.Sdk`) cho các kiểu dùng chung. `Shop.Contracts` không tham chiếu ngược lại service nào.
@@ -64,6 +66,10 @@ cp .env.example .env                              # lần đầu: secret Postgre
 docker compose up --build -d                      # CẢ SHOP 1 lệnh: db + catalog:3001 + cart:3002 + order:3003
 docker compose ps                                 # db "healthy", ba service "Up"
 docker compose down                               # KHÔNG dùng `down -v` — -v xoá volume pgdata
+
+bash scripts/build-images.sh                      # PHÁT HÀNH cả 4 image, tag = git SHA ngắn
+bash scripts/build-images.sh --latest             # thêm alias :latest trỏ đúng image SHA đó
+docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}'   starci-shop/catalog:$(git rev-parse --short HEAD)     # -> SHA ngắn, image tự khai commit
 ```
 
 Health check: `GET /health` → `{"service":"<tên>","status":"ok"}`. **Catalog/Cart/order đọc `PORT` từ env** (mặc định 5001/5002/5003, bind `0.0.0.0`, cả ba Dockerized); payment vẫn theo `launchSettings.json` (5004).
@@ -243,11 +249,102 @@ healthy
 
 Cổng ở đây là **3003** (quy ước đã chốt của repo từ milestone compose: catalog 3001 / cart 3002 / order 3003), không phải `8080` như ví dụ trong đề — cơ chế giống hệt, chỉ khác con số, và số đó đến từ env `PORT` nên đổi được mà không sửa image.
 
+## Phát hành bộ image tái lập được (milestone release)
+
+Một lệnh phát hành **cả bốn** service — catalog, cart, order **và payment** (payment được đóng gói lần đầu ở milestone này):
+
+```bash
+bash scripts/build-images.sh              # tag = git SHA ngắn
+bash scripts/build-images.sh --latest     # thêm alias :latest trỏ đúng image đó
+```
+
+Bốn thứ khoá chặt "cùng một commit ⇒ cùng một bộ triển khai":
+
+| Ghim cái gì | Bằng cách nào | Nếu không ghim thì sao |
+|---|---|---|
+| Base image | `FROM …/sdk:10.0@sha256:3dae2f76…`, `…/aspnet:10.0@sha256:1f51d2d6…` | tag `10.0` trôi theo mỗi bản patch — cùng commit, khác base |
+| Gói NuGet | `RestorePackagesWithLockFile` + `packages.lock.json` **đã commit** + `dotnet restore --locked-mode` | range `[10.0.3, )` resolve ra version khác ở lần build sau |
+| Danh tính image | `ARG GIT_SHA` → `ENV APP_VERSION` + `LABEL org.opencontainers.image.revision` | `latest` trôi nổi, không biết image nào từ commit nào |
+| Tốc độ build lại | `.csproj` + `packages.lock.json` copy **trước** source | sửa một dòng `.cs` là restore lại toàn bộ NuGet |
+
+`ARG GIT_SHA` **không có default**: build thiếu ARG thì version rỗng và lộ ra ngay, thay vì dán nhãn sai một image. `latest` chỉ là **alias** (`docker tag`) — artifact bất biến luôn là tag SHA.
+
+### Kiểm chứng chạy thật (Docker 29.2.1, commit `a4d865a`)
+
+```bash
+# --- Lần 1: build nguội cả 4 service ---
+$ bash scripts/build-images.sh
+==> build starci-shop/catalog:a4d865a  (-f Dockerfile)
+==> build starci-shop/cart:a4d865a     (-f services/Cart/Dockerfile)
+==> build starci-shop/order:a4d865a    (-f services/order/Dockerfile)
+==> build starci-shop/payment:a4d865a  (-f services/payment/Dockerfile)
+
+Bộ image của commit a4d865a:
+  starci-shop/payment:a4d865a  340MB
+  starci-shop/order:a4d865a    351MB     # +11MB vì có curl cho HEALTHCHECK
+  starci-shop/catalog:a4d865a  342MB
+  starci-shop/cart:a4d865a     340MB
+
+Kiểm chứng revision nướng trong image:
+  starci-shop/catalog:a4d865a -> revision=a4d865a
+  starci-shop/cart:a4d865a    -> revision=a4d865a
+  starci-shop/order:a4d865a   -> revision=a4d865a
+  starci-shop/payment:a4d865a -> revision=a4d865a
+
+# --- Lần 2 trên CÙNG commit: layer restore CACHED ở cả 4 service ---
+$ bash scripts/build-images.sh
+#10 [build 5/8] RUN dotnet restore services/Catalog/Catalog.csproj --locked-mode
+#10 CACHED
+#11 [build 5/8] RUN dotnet restore services/Cart/Cart.csproj --locked-mode
+#11 CACHED
+#13 [build 5/8] RUN dotnet restore services/order/order.csproj --locked-mode
+#13 CACHED
+#13 [build 4/6] RUN dotnet restore services/payment/payment.csproj --locked-mode
+#13 CACHED
+# 35 layer CACHED / build lại gần như tức thì
+
+# --- Label đọc đúng như đề yêu cầu ---
+$ docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+    starci-shop/catalog:$(git rev-parse --short HEAD)
+a4d865a
+
+# --- Hai lần build cho ra CÙNG image config digest ---
+$ # run 3 và run 4, so 'exporting config':
+run3: 54b558a5294e  56c5170b2eac  67b0ad8c2a8a  f2568b623924
+run4: 54b558a5294e  56c5170b2eac  67b0ad8c2a8a  f2568b623924   # GIỐNG HỆT
+
+# --- payment (image mới) chạy thật, tự khai version ---
+$ docker run -d -p 5104:5104 -e PORT=5104 starci-shop/payment:a4d865a
+$ curl -s localhost:5104/health
+{"service":"payment","status":"ok"}
+$ docker logs <id>
+[payment] listening on :5104
+[payment] version = a4d865a          # APP_VERSION đến từ ARG GIT_SHA
+```
+
+**Lockfile không phải để trang trí** — thử làm lệch csproj so với lockfile rồi build:
+
+```bash
+$ # đổi Npgsql 10.0.3 -> 9.0.4 trong order.csproj mà KHÔNG cập nhật packages.lock.json
+$ docker build -f services/order/Dockerfile -t drift-test .
+error NU1004: The package reference Npgsql version has changed from [10.0.3, ) to [9.0.4, ).
+The packages lock file is inconsistent with the project dependencies so restore can't be run
+in locked mode.
+ERROR: process "/bin/sh -c dotnet restore services/order/order.csproj --locked-mode"
+       did not complete successfully: exit code: 1
+```
+
+Build **fail** thay vì âm thầm phát hành một image với cây NuGet khác. (csproj đã được phục hồi sau thử nghiệm.)
+
+> Trung thực về giới hạn: `docker inspect --format '{{.Id}}'` (digest của manifest **list**) đổi mỗi lần build vì buildx sinh attestation manifest mới kèm timestamp. Thứ quyết định nội dung container — **image config digest** — thì giống hệt qua các lần build, như bảng run3/run4 ở trên. Muốn `.Id` cũng bất biến thì phải tắt attestation (`--provenance=false --sbom=false`) hoặc set `SOURCE_DATE_EPOCH`; chưa làm vì task không yêu cầu.
+
+Compose vẫn là **đường dev**: nó truyền `GIT_SHA=${GIT_SHA:-dev}` nên image do compose build mang nhãn `dev` cho rõ ràng, không giả một SHA. Artifact phát hành luôn sinh từ `scripts/build-images.sh`. Compose vẫn chỉ dựng `db + catalog + cart + order` như milestone trước — payment có image nhưng chưa vào compose vì chưa có phụ thuộc runtime nào cần nó.
+
 ---
 
 # Mã nguồn đầy đủ (để đối chiếu chấm điểm)
 
-> ⚠️ **Listing đã regenerate cho milestone compose** (sinh trực tiếp từ file thật nên số dòng khớp): `Program.cs`/`Config.cs`/`.csproj` của **Catalog, Cart, order** đều là bản env-driven hiện tại — `PORT`/`SERVICE_NAME` + địa chỉ phụ thuộc (`DATABASE_URL`, `CATALOG_URL`, `CART_URL`) đọc từ env, `UseUrls` bind `0.0.0.0`. Catalog thêm `ProductStore.cs` (Npgsql, `/products` đọc Postgres, seed khi bảng rỗng). **payment** KHÔNG đổi ở milestone này (cổng theo `launchSettings.json`, chưa Dockerized) nên listing của nó vẫn như cũ.
+> ⚠️ **Listing đã regenerate cho milestone release (image tái lập được)** — sinh trực tiếp từ file thật nên số dòng khớp. Bốn Dockerfile giờ **ghim base bằng digest**, restore ở `--locked-mode` với `packages.lock.json`, và nướng `ARG GIT_SHA` vào `ENV APP_VERSION` + OCI label. **payment lần đầu có `Dockerfile` và cổng từ env `PORT`** (mặc định 5004) — nó không còn phụ thuộc `launchSettings.json` vì file đó không có trong image. `scripts/build-images.sh` là lệnh phát hành. `packages.lock.json` của 5 project KHÔNG in ở đây (máy sinh, dài) — chúng đã được commit và là thứ `--locked-mode` đối chiếu.
 
 Toàn bộ nội dung thực, kèm số dòng, của các file quyết định — cho **cả 4** service.
 
@@ -381,16 +478,28 @@ Toàn bộ nội dung thực, kèm số dòng, của các file quyết định �
 ```csharp
  1  // payment: sở hữu việc thu tiền cho một đơn và ghi lại kết quả thanh toán.
  2  // KHÔNG quản lý sản phẩm hay giỏ hàng.
- 3  var builder = WebApplication.CreateBuilder(args);
- 4  var app = builder.Build();
- 5
- 6  var serviceName = Environment.GetEnvironmentVariable("SERVICE_NAME") ?? "payment";
- 7
- 8  // Liveness probe: không xác thực, không tác dụng phụ, đăng ký trước UseAuthentication (nếu milestone sau thêm auth).
- 9  app.MapGet("/health", () => Results.Ok(HealthResponse.Ok(serviceName)))
-10     .AllowAnonymous();
-11
-12  app.Run();
+ 3  var serviceName = Environment.GetEnvironmentVariable("SERVICE_NAME") ?? "payment";
+ 4  
+ 5  // Cổng từ env như ba service kia (milestone image tái lập được: payment giờ cũng được
+ 6  // đóng gói, nên không thể phụ thuộc launchSettings.json — file đó chỉ tồn tại ở dev).
+ 7  var rawPort = Environment.GetEnvironmentVariable("PORT");
+ 8  int port = 5004;
+ 9  if (!string.IsNullOrEmpty(rawPort) && !int.TryParse(rawPort, out port))
+10      throw new InvalidOperationException($"Invalid PORT=\"{rawPort}\": expected a number");
+11  
+12  var builder = WebApplication.CreateBuilder(args);
+13  // Bind 0.0.0.0 để container reachable qua -p.
+14  builder.WebHost.UseUrls($"http://0.0.0.0:{port}");
+15  var app = builder.Build();
+16  
+17  // Liveness probe: không xác thực, không tác dụng phụ, đăng ký trước UseAuthentication (nếu milestone sau thêm auth).
+18  app.MapGet("/health", () => Results.Ok(HealthResponse.Ok(serviceName)))
+19     .AllowAnonymous();
+20  
+21  Console.WriteLine($"[{serviceName}] listening on :{port}");
+22  // APP_VERSION do image nướng vào lúc build (ARG GIT_SHA); chạy từ source thì là "dev".
+23  Console.WriteLine($"[{serviceName}] version = {Environment.GetEnvironmentVariable("APP_VERSION") ?? "dev"}");
+24  app.Run();
 ```
 
 ### `services/Catalog/HealthResponse.cs`
@@ -718,48 +827,83 @@ Nguồn `/products`: Postgres qua **Npgsql** (ADO thuần, không EF Core). Seed
 
 ```xml
  1  <Project Sdk="Microsoft.NET.Sdk.Web">
- 2
+ 2  
  3    <PropertyGroup>
  4      <TargetFramework>net10.0</TargetFramework>
  5      <Nullable>enable</Nullable>
  6      <ImplicitUsings>enable</ImplicitUsings>
- 7      <!-- Chốt tên assembly để output publish (Catalog.dll) khớp ENTRYPOINT của Dockerfile,
- 8           không phụ thuộc casing thư mục (NTFS case-insensitive). -->
- 9      <AssemblyName>Catalog</AssemblyName>
-10    </PropertyGroup>
-11
-12    <ItemGroup>
-13      <ProjectReference Include="..\..\packages\Shop.Contracts\Shop.Contracts.csproj" />
-14    </ItemGroup>
-15
+ 7      <!-- Lockfile ĐƯỢC COMMIT (packages.lock.json). Docker restore chạy ở locked mode nên
+ 8           hai lần build cùng một commit luôn kéo đúng cùng một cây NuGet; lockfile lệch
+ 9           csproj thì build FAIL thay vì âm thầm nâng version. -->
+10      <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+11      <!-- Chốt tên assembly để output publish (Catalog.dll) khớp ENTRYPOINT của Dockerfile,
+12           không phụ thuộc casing thư mục (NTFS case-insensitive). -->
+13      <AssemblyName>Catalog</AssemblyName>
+14    </PropertyGroup>
+15  
 16    <ItemGroup>
-17      <PackageReference Include="Npgsql" Version="10.0.3" />
+17      <ProjectReference Include="..\..\packages\Shop.Contracts\Shop.Contracts.csproj" />
 18    </ItemGroup>
-19
-20  </Project>
+19  
+20    <ItemGroup>
+21      <PackageReference Include="Npgsql" Version="10.0.3" />
+22    </ItemGroup>
+23  
+24  </Project>
 ```
 
 ### `Dockerfile` (đa tầng — tầng build có SDK, tầng runtime KHÔNG)
 
 ```dockerfile
- 1  # --- tầng build: full .NET SDK, restore + publish ---
- 2  FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
- 3  WORKDIR /src
- 4  COPY packages/Shop.Contracts/Shop.Contracts.csproj packages/Shop.Contracts/
- 5  COPY services/Catalog/Catalog.csproj services/Catalog/
- 6  RUN dotnet restore services/Catalog/Catalog.csproj
- 7  COPY packages/Shop.Contracts/ packages/Shop.Contracts/
- 8  COPY services/Catalog/ services/Catalog/
- 9  RUN dotnet publish services/Catalog/Catalog.csproj -c Release -o /app/publish --no-restore
-10
-11  # --- tầng runtime: CHỈ ASP.NET runtime, không SDK, không chạy root ---
-12  FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
-13  ENV DOTNET_RUNNING_IN_CONTAINER=true
-14  WORKDIR /app
-15  COPY --from=build /app/publish ./
-16  USER app
-17  EXPOSE 3001
-18  ENTRYPOINT ["dotnet", "Catalog.dll"]
+ 1  # Dockerfile ĐA TẦNG cho service Catalog (.NET). Build context = GỐC repo
+ 2  # (Catalog tham chiếu packages/Shop.Contracts). Đừng `docker build` tay nữa —
+ 3  # `bash scripts/build-images.sh` tag theo git SHA và truyền ARG GIT_SHA cho cả 4 service.
+ 4  # Bản đơn tầng cũ giữ ở Dockerfile.single để so kích thước (SDK lên tận production).
+ 5  #
+ 6  # TÁI LẬP ĐƯỢC: base ghim bằng DIGEST (không phải tag trôi nổi), NuGet ghim bằng
+ 7  # packages.lock.json đã commit + restore ở locked mode ⇒ cùng một commit, cùng một image.
+ 8  
+ 9  # --- tầng build: full .NET SDK, ghim digest ---
+10  FROM mcr.microsoft.com/dotnet/sdk:10.0@sha256:3dae2f7699441af56216ff64d5c9b6dfce7cd7dc7f4f71d353d29662b10a384f AS build
+11  WORKDIR /src
+12  
+13  # .csproj + packages.lock.json TRƯỚC source: layer restore chỉ mất cache khi dependency
+14  # đổi, nên sửa một file .cs KHÔNG kéo lại gói NuGet nào (lần build sau in ra CACHED).
+15  COPY packages/Shop.Contracts/Shop.Contracts.csproj packages/Shop.Contracts/packages.lock.json packages/Shop.Contracts/
+16  COPY services/Catalog/Catalog.csproj services/Catalog/packages.lock.json services/Catalog/
+17  # --locked-mode: lockfile lệch csproj thì FAIL build, không âm thầm resolve version khác.
+18  RUN dotnet restore services/Catalog/Catalog.csproj --locked-mode
+19  
+20  # Source copy SAU restore.
+21  COPY packages/Shop.Contracts/ packages/Shop.Contracts/
+22  COPY services/Catalog/ services/Catalog/
+23  RUN dotnet publish services/Catalog/Catalog.csproj -c Release -o /app/publish --no-restore
+24  
+25  # --- tầng runtime: CHỈ ASP.NET runtime (ghim digest), không SDK, không chạy root ---
+26  FROM mcr.microsoft.com/dotnet/aspnet:10.0@sha256:1f51d2d65ace46d6395e773fb4cfc1c74d36fb4f08e5cf996e7f6961b45e9283 AS runtime
+27  
+28  # GIT_SHA tiêm lúc build, KHÔNG default về giá trị trôi nổi: build thiếu ARG thì version
+29  # rỗng và thấy ngay, thay vì gắn nhãn sai cho một image.
+30  ARG GIT_SHA
+31  ENV APP_VERSION=${GIT_SHA} \
+32      DOTNET_RUNNING_IN_CONTAINER=true
+33  
+34  # Image tự khai danh tính: `docker inspect` đọc ra đúng commit đã sinh ra nó.
+35  LABEL org.opencontainers.image.revision=${GIT_SHA} \
+36        org.opencontainers.image.version=${GIT_SHA} \
+37        org.opencontainers.image.title=starci-shop/catalog \
+38        org.opencontainers.image.source=https://github.com/betuanminh22032003/beminhshop
+39  
+40  WORKDIR /app
+41  
+42  # CHỈ mang sang output đã publish — toolchain build ở lại tầng builder.
+43  COPY --from=build /app/publish ./
+44  
+45  # Image aspnet có sẵn user không phải root tên "app".
+46  USER app
+47  EXPOSE 3001
+48  # PORT và CATALOG_DATABASE_URL đọc từ env lúc chạy (không nướng vào image).
+49  ENTRYPOINT ["dotnet", "Catalog.dll"]
 ```
 
 (Comment tiếng Việt đầy đủ nằm trong file thật; trên đây rút gọn phần chú thích.)
@@ -769,105 +913,117 @@ Nguồn `/products`: Postgres qua **Npgsql** (ADO thuần, không EF Core). Seed
 Cả shop bằng một lệnh: secret từ `.env`, DNS theo tên service trên `shopnet`, `pgdata` named volume, `depends_on: service_healthy`.
 
 ```yaml
- 1  # Cả shop bằng MỘT lệnh: docker compose up --build
- 2  #
- 3  # - Secret KHÔNG nằm trong file này: mọi ${VAR} được compose nạp từ .env (gitignored),
- 4  #   .env.example là bản mẫu có thể commit.
- 5  # - Service tìm nhau qua DNS THEO TÊN SERVICE trên mạng shopnet (db, catalog, cart),
- 6  #   không localhost, không IP cứng — bridge mặc định không phân giải tên nên shopnet
- 7  #   phải được khai báo tường minh.
- 8  # - Dữ liệu Postgres nằm trên named volume pgdata nên sản phẩm đã seed sống sót qua
- 9  #   docker compose down && docker compose up (KHÔNG dùng `down -v`).
-10  # - Mỗi service build từ Dockerfile riêng nhưng context là GỐC repo, vì cả ba tham
-11  #   chiếu packages/Shop.Contracts.
-12  
-13  services:
-14    db:
-15      image: postgres:16-alpine
-16      environment:
-17        POSTGRES_USER: ${POSTGRES_USER}
-18        POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-19        POSTGRES_DB: ${POSTGRES_DB}
-20      volumes:
-21        # Named volume -> dữ liệu sống lâu hơn container.
-22        - pgdata:/var/lib/postgresql/data
-23      networks:
-24        - shopnet
-25      healthcheck:
-26        # depends_on: service_healthy của app dựa vào chính healthcheck này.
-27        # pg_isready chỉ thoát 0 khi Postgres ĐÃ nhận kết nối — đó là điều kiện chặn thật.
-28        test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
-29        interval: 5s
-30        timeout: 3s
-31        retries: 10
-32        # Vài giây đầu Postgres còn initdb: đừng tính là lần retry thất bại.
-33        start_period: 10s
-34  
-35    catalog:
-36      build:
-37        context: .
-38        dockerfile: Dockerfile
-39      environment:
-40        PORT: 3001
-41        SERVICE_NAME: catalog
-42        # host là "db" — tên service trong compose, do DNS của shopnet phân giải.
-43        DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:${POSTGRES_PORT}/${POSTGRES_DB}
-44      depends_on:
-45        db:
-46          condition: service_healthy
-47      ports:
-48        - "3001:3001"
-49      networks:
-50        - shopnet
-51  
-52    cart:
-53      build:
-54        context: .
-55        dockerfile: services/Cart/Dockerfile
-56      environment:
-57        PORT: 3002
-58        SERVICE_NAME: cart
-59        DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:${POSTGRES_PORT}/${POSTGRES_DB}
-60        # Lưu lượng service→service cũng đi bằng DNS theo tên service.
-61        CATALOG_URL: http://catalog:3001
-62      depends_on:
-63        db:
-64          condition: service_healthy
-65      ports:
-66        - "3002:3002"
-67      networks:
-68        - shopnet
-69  
-70    order:
-71      build:
-72        context: .
-73        dockerfile: services/order/Dockerfile
-74      environment:
-75        PORT: 3003
-76        SERVICE_NAME: order
-77        DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:${POSTGRES_PORT}/${POSTGRES_DB}
-78        CATALOG_URL: http://catalog:3001
-79        CART_URL: http://cart:3002
-80      # order KHÔNG được khởi động cho tới khi db báo healthy — nhờ vậy kết nối Npgsql
-81      # đầu tiên không còn gặp "Connection refused" ở lần `up` từ trạng thái sạch.
-82      # Trạng thái healthy của chính order do HEALTHCHECK trong image quyết định
-83      # (services/order/Dockerfile: curl /health -> SELECT 1 tới Postgres).
-84      depends_on:
-85        db:
-86          condition: service_healthy
-87      ports:
-88        - "3003:3003"
-89      networks:
-90        - shopnet
-91  
-92  networks:
-93    # Mạng do người dùng định nghĩa = có DNS nội bộ theo tên service.
-94    shopnet:
-95      driver: bridge
-96  
-97  volumes:
-98    # Khai báo một lần ở cấp cao nhất: Docker quản lý vòng đời volume độc lập với container.
-99    pgdata:
+  1  # Cả shop bằng MỘT lệnh: docker compose up --build
+  2  #
+  3  # - Secret KHÔNG nằm trong file này: mọi ${VAR} được compose nạp từ .env (gitignored),
+  4  #   .env.example là bản mẫu có thể commit.
+  5  # - Service tìm nhau qua DNS THEO TÊN SERVICE trên mạng shopnet (db, catalog, cart),
+  6  #   không localhost, không IP cứng — bridge mặc định không phân giải tên nên shopnet
+  7  #   phải được khai báo tường minh.
+  8  # - Dữ liệu Postgres nằm trên named volume pgdata nên sản phẩm đã seed sống sót qua
+  9  #   docker compose down && docker compose up (KHÔNG dùng `down -v`).
+ 10  # - Mỗi service build từ Dockerfile riêng nhưng context là GỐC repo, vì cả ba tham
+ 11  #   chiếu packages/Shop.Contracts.
+ 12  
+ 13  services:
+ 14    db:
+ 15      image: postgres:16-alpine
+ 16      environment:
+ 17        POSTGRES_USER: ${POSTGRES_USER}
+ 18        POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+ 19        POSTGRES_DB: ${POSTGRES_DB}
+ 20      volumes:
+ 21        # Named volume -> dữ liệu sống lâu hơn container.
+ 22        - pgdata:/var/lib/postgresql/data
+ 23      networks:
+ 24        - shopnet
+ 25      healthcheck:
+ 26        # depends_on: service_healthy của app dựa vào chính healthcheck này.
+ 27        # pg_isready chỉ thoát 0 khi Postgres ĐÃ nhận kết nối — đó là điều kiện chặn thật.
+ 28        test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+ 29        interval: 5s
+ 30        timeout: 3s
+ 31        retries: 10
+ 32        # Vài giây đầu Postgres còn initdb: đừng tính là lần retry thất bại.
+ 33        start_period: 10s
+ 34  
+ 35    catalog:
+ 36      build:
+ 37        context: .
+ 38        dockerfile: Dockerfile
+ 39        args:
+ 40          # Compose là đường dev: image mang nhãn "dev" cho RÕ RÀNG, không giả một SHA.
+ 41          # Artifact phát hành bất biến sinh bằng `bash scripts/build-images.sh` (tag = git SHA).
+ 42          GIT_SHA: ${GIT_SHA:-dev}
+ 43      environment:
+ 44        PORT: 3001
+ 45        SERVICE_NAME: catalog
+ 46        # host là "db" — tên service trong compose, do DNS của shopnet phân giải.
+ 47        DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:${POSTGRES_PORT}/${POSTGRES_DB}
+ 48      depends_on:
+ 49        db:
+ 50          condition: service_healthy
+ 51      ports:
+ 52        - "3001:3001"
+ 53      networks:
+ 54        - shopnet
+ 55  
+ 56    cart:
+ 57      build:
+ 58        context: .
+ 59        dockerfile: services/Cart/Dockerfile
+ 60        args:
+ 61          # Compose là đường dev: image mang nhãn "dev" cho RÕ RÀNG, không giả một SHA.
+ 62          # Artifact phát hành bất biến sinh bằng `bash scripts/build-images.sh` (tag = git SHA).
+ 63          GIT_SHA: ${GIT_SHA:-dev}
+ 64      environment:
+ 65        PORT: 3002
+ 66        SERVICE_NAME: cart
+ 67        DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:${POSTGRES_PORT}/${POSTGRES_DB}
+ 68        # Lưu lượng service→service cũng đi bằng DNS theo tên service.
+ 69        CATALOG_URL: http://catalog:3001
+ 70      depends_on:
+ 71        db:
+ 72          condition: service_healthy
+ 73      ports:
+ 74        - "3002:3002"
+ 75      networks:
+ 76        - shopnet
+ 77  
+ 78    order:
+ 79      build:
+ 80        context: .
+ 81        dockerfile: services/order/Dockerfile
+ 82        args:
+ 83          # Compose là đường dev: image mang nhãn "dev" cho RÕ RÀNG, không giả một SHA.
+ 84          # Artifact phát hành bất biến sinh bằng `bash scripts/build-images.sh` (tag = git SHA).
+ 85          GIT_SHA: ${GIT_SHA:-dev}
+ 86      environment:
+ 87        PORT: 3003
+ 88        SERVICE_NAME: order
+ 89        DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:${POSTGRES_PORT}/${POSTGRES_DB}
+ 90        CATALOG_URL: http://catalog:3001
+ 91        CART_URL: http://cart:3002
+ 92      # order KHÔNG được khởi động cho tới khi db báo healthy — nhờ vậy kết nối Npgsql
+ 93      # đầu tiên không còn gặp "Connection refused" ở lần `up` từ trạng thái sạch.
+ 94      # Trạng thái healthy của chính order do HEALTHCHECK trong image quyết định
+ 95      # (services/order/Dockerfile: curl /health -> SELECT 1 tới Postgres).
+ 96      depends_on:
+ 97        db:
+ 98          condition: service_healthy
+ 99      ports:
+100        - "3003:3003"
+101      networks:
+102        - shopnet
+103  
+104  networks:
+105    # Mạng do người dùng định nghĩa = có DNS nội bộ theo tên service.
+106    shopnet:
+107      driver: bridge
+108  
+109  volumes:
+110    # Khai báo một lần ở cấp cao nhất: Docker quản lý vòng đời volume độc lập với container.
+111    pgdata:
 ```
 
 ### `.env.example`
@@ -888,109 +1044,265 @@ Bản mẫu commit được. `.env` thật (cùng khoá, giá trị thật) bị
 
 ```dockerfile
  1  # Dockerfile ĐA TẦNG cho service Cart (.NET). Build context = GỐC repo
- 2  # (Cart tham chiếu packages/Shop.Contracts):
- 3  #   docker build -f services/Cart/Dockerfile -t starci-shop/cart:slim .
- 4  # docker-compose.yaml khai đúng cặp context: . / dockerfile: services/Cart/Dockerfile.
- 5
- 6  # --- tầng build: full .NET SDK, restore + publish ---
- 7  FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
- 8  WORKDIR /src
- 9
-10  # Copy .csproj và restore TRƯỚC khi copy source (tận dụng layer cache).
-11  COPY packages/Shop.Contracts/Shop.Contracts.csproj packages/Shop.Contracts/
-12  COPY services/Cart/Cart.csproj services/Cart/
-13  RUN dotnet restore services/Cart/Cart.csproj
-14
-15  # Copy source rồi publish ra /app/publish.
-16  COPY packages/Shop.Contracts/ packages/Shop.Contracts/
-17  COPY services/Cart/ services/Cart/
-18  RUN dotnet publish services/Cart/Cart.csproj -c Release -o /app/publish --no-restore
-19
-20  # --- tầng runtime: CHỈ ASP.NET runtime, không SDK, không chạy root ---
-21  FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
-22  ENV DOTNET_RUNNING_IN_CONTAINER=true
-23  WORKDIR /app
-24
-25  # CHỈ mang sang output đã publish — toolchain build ở lại tầng builder.
-26  COPY --from=build /app/publish ./
-27
-28  # Image aspnet có sẵn user không phải root tên "app".
-29  USER app
-30  EXPOSE 3002
-31  # PORT / CATALOG_URL / DATABASE_URL đọc từ env lúc chạy (không nướng vào image).
-32  ENTRYPOINT ["dotnet", "Cart.dll"]
+ 2  # (Cart tham chiếu packages/Shop.Contracts). Build qua `bash scripts/build-images.sh`
+ 3  # để tag theo git SHA; docker-compose.yaml khai đúng cặp context: . / dockerfile: services/Cart/Dockerfile.
+ 4  #
+ 5  # TÁI LẬP ĐƯỢC: base ghim bằng DIGEST, NuGet ghim bằng packages.lock.json + locked mode.
+ 6  
+ 7  # --- tầng build: full .NET SDK, ghim digest ---
+ 8  FROM mcr.microsoft.com/dotnet/sdk:10.0@sha256:3dae2f7699441af56216ff64d5c9b6dfce7cd7dc7f4f71d353d29662b10a384f AS build
+ 9  WORKDIR /src
+10  
+11  # .csproj + packages.lock.json TRƯỚC source: layer restore giữ cache tới khi dependency đổi.
+12  COPY packages/Shop.Contracts/Shop.Contracts.csproj packages/Shop.Contracts/packages.lock.json packages/Shop.Contracts/
+13  COPY services/Cart/Cart.csproj services/Cart/packages.lock.json services/Cart/
+14  # --locked-mode: lockfile lệch csproj thì FAIL build, không âm thầm resolve version khác.
+15  RUN dotnet restore services/Cart/Cart.csproj --locked-mode
+16  
+17  # Source copy SAU restore.
+18  COPY packages/Shop.Contracts/ packages/Shop.Contracts/
+19  COPY services/Cart/ services/Cart/
+20  RUN dotnet publish services/Cart/Cart.csproj -c Release -o /app/publish --no-restore
+21  
+22  # --- tầng runtime: CHỈ ASP.NET runtime (ghim digest), không SDK, không chạy root ---
+23  FROM mcr.microsoft.com/dotnet/aspnet:10.0@sha256:1f51d2d65ace46d6395e773fb4cfc1c74d36fb4f08e5cf996e7f6961b45e9283 AS runtime
+24  
+25  ARG GIT_SHA
+26  ENV APP_VERSION=${GIT_SHA} \
+27      DOTNET_RUNNING_IN_CONTAINER=true
+28  
+29  LABEL org.opencontainers.image.revision=${GIT_SHA} \
+30        org.opencontainers.image.version=${GIT_SHA} \
+31        org.opencontainers.image.title=starci-shop/cart \
+32        org.opencontainers.image.source=https://github.com/betuanminh22032003/beminhshop
+33  
+34  WORKDIR /app
+35  
+36  # CHỈ mang sang output đã publish — toolchain build ở lại tầng builder.
+37  COPY --from=build /app/publish ./
+38  
+39  # Image aspnet có sẵn user không phải root tên "app".
+40  USER app
+41  EXPOSE 3002
+42  # PORT / CATALOG_URL / DATABASE_URL đọc từ env lúc chạy (không nướng vào image).
+43  ENTRYPOINT ["dotnet", "Cart.dll"]
 ```
 
 ### `services/order/Dockerfile`
 
 ```dockerfile
  1  # Dockerfile ĐA TẦNG cho service order (.NET). Build context = GỐC repo
- 2  # (order tham chiếu packages/Shop.Contracts):
- 3  #   docker build -f services/order/Dockerfile -t starci-shop/order:slim .
- 4  # docker-compose.yaml khai đúng cặp context: . / dockerfile: services/order/Dockerfile.
- 5  
- 6  # --- tầng build: full .NET SDK, restore + publish ---
- 7  FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
- 8  WORKDIR /src
- 9  
-10  # Copy .csproj và restore TRƯỚC khi copy source (tận dụng layer cache).
-11  COPY packages/Shop.Contracts/Shop.Contracts.csproj packages/Shop.Contracts/
-12  COPY services/order/order.csproj services/order/
-13  RUN dotnet restore services/order/order.csproj
-14  
-15  # Copy source rồi publish ra /app/publish.
-16  COPY packages/Shop.Contracts/ packages/Shop.Contracts/
-17  COPY services/order/ services/order/
-18  RUN dotnet publish services/order/order.csproj -c Release -o /app/publish --no-restore
-19  
-20  # --- tầng runtime: CHỈ ASP.NET runtime, không SDK, không chạy root ---
-21  FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
-22  ENV DOTNET_RUNNING_IN_CONTAINER=true
-23  WORKDIR /app
+ 2  # (order tham chiếu packages/Shop.Contracts). Build qua `bash scripts/build-images.sh`
+ 3  # để tag theo git SHA; docker-compose.yaml khai đúng cặp context: . / dockerfile: services/order/Dockerfile.
+ 4  #
+ 5  # TÁI LẬP ĐƯỢC: base ghim bằng DIGEST, NuGet ghim bằng packages.lock.json + locked mode.
+ 6  
+ 7  # --- tầng build: full .NET SDK, ghim digest ---
+ 8  FROM mcr.microsoft.com/dotnet/sdk:10.0@sha256:3dae2f7699441af56216ff64d5c9b6dfce7cd7dc7f4f71d353d29662b10a384f AS build
+ 9  WORKDIR /src
+10  
+11  # .csproj + packages.lock.json TRƯỚC source: layer restore giữ cache tới khi dependency đổi.
+12  COPY packages/Shop.Contracts/Shop.Contracts.csproj packages/Shop.Contracts/packages.lock.json packages/Shop.Contracts/
+13  COPY services/order/order.csproj services/order/packages.lock.json services/order/
+14  # --locked-mode: lockfile lệch csproj thì FAIL build, không âm thầm resolve version khác.
+15  RUN dotnet restore services/order/order.csproj --locked-mode
+16  
+17  # Source copy SAU restore.
+18  COPY packages/Shop.Contracts/ packages/Shop.Contracts/
+19  COPY services/order/ services/order/
+20  RUN dotnet publish services/order/order.csproj -c Release -o /app/publish --no-restore
+21  
+22  # --- tầng runtime: CHỈ ASP.NET runtime (ghim digest), không SDK, không chạy root ---
+23  FROM mcr.microsoft.com/dotnet/aspnet:10.0@sha256:1f51d2d65ace46d6395e773fb4cfc1c74d36fb4f08e5cf996e7f6961b45e9283 AS runtime
 24  
-25  # curl là công cụ DUY NHẤT thêm vào runtime, để HEALTHCHECK tự thăm dò /health được.
-26  # Cài trước khi hạ quyền (apt cần root), rồi dọn apt lists cho image gọn.
-27  RUN apt-get update \
-28      && apt-get install -y --no-install-recommends curl \
-29      && rm -rf /var/lib/apt/lists/*
-30  
-31  # CHỈ mang sang output đã publish — toolchain build ở lại tầng builder.
-32  COPY --from=build /app/publish ./
+25  ARG GIT_SHA
+26  ENV APP_VERSION=${GIT_SHA} \
+27      DOTNET_RUNNING_IN_CONTAINER=true
+28  
+29  LABEL org.opencontainers.image.revision=${GIT_SHA} \
+30        org.opencontainers.image.version=${GIT_SHA} \
+31        org.opencontainers.image.title=starci-shop/order \
+32        org.opencontainers.image.source=https://github.com/betuanminh22032003/beminhshop
 33  
-34  # Image aspnet có sẵn user không phải root tên "app".
-35  USER app
-36  EXPOSE 3003
-37  # PORT / CATALOG_URL / CART_URL / DATABASE_URL đọc từ env lúc chạy (không nướng vào image).
-38  
-39  # Container tự thăm dò /health — endpoint đó chạy `SELECT 1` thật tới Postgres, nên
-40  # "healthy" ở đây nghĩa là order THỰC SỰ nói chuyện được với DB, không chỉ còn sống.
-41  # Dạng shell (không phải exec) để ${PORT} nở lúc chạy — cổng vẫn do env quyết định.
-42  # curl -f thoát khác 0 khi HTTP >= 400, nên 503 lập tức thành "unhealthy".
-43  HEALTHCHECK --interval=10s --timeout=3s --retries=5 --start-period=20s \
-44      CMD curl -fsS "http://localhost:${PORT:-3003}/health" || exit 1
-45  
-46  ENTRYPOINT ["dotnet", "order.dll"]
+34  WORKDIR /app
+35  
+36  # curl là công cụ DUY NHẤT thêm vào runtime, để HEALTHCHECK tự thăm dò /health được.
+37  # Cài trước khi hạ quyền (apt cần root), rồi dọn apt lists cho image gọn.
+38  RUN apt-get update \
+39      && apt-get install -y --no-install-recommends curl \
+40      && rm -rf /var/lib/apt/lists/*
+41  
+42  # CHỈ mang sang output đã publish — toolchain build ở lại tầng builder.
+43  COPY --from=build /app/publish ./
+44  
+45  # Image aspnet có sẵn user không phải root tên "app".
+46  USER app
+47  EXPOSE 3003
+48  # PORT / CATALOG_URL / CART_URL / DATABASE_URL đọc từ env lúc chạy (không nướng vào image).
+49  
+50  # Container tự thăm dò /health — endpoint đó chạy `SELECT 1` thật tới Postgres, nên
+51  # "healthy" ở đây nghĩa là order THỰC SỰ nói chuyện được với DB, không chỉ còn sống.
+52  # Dạng shell (không phải exec) để ${PORT} nở lúc chạy — cổng vẫn do env quyết định.
+53  # curl -f thoát khác 0 khi HTTP >= 400, nên 503 lập tức thành "unhealthy".
+54  HEALTHCHECK --interval=10s --timeout=3s --retries=5 --start-period=20s \
+55      CMD curl -fsS "http://localhost:${PORT:-3003}/health" || exit 1
+56  
+57  ENTRYPOINT ["dotnet", "order.dll"]
+```
+
+### `services/payment/Dockerfile`
+
+```dockerfile
+ 1  # Dockerfile ĐA TẦNG cho service payment (.NET). Build context = GỐC repo cho ĐỒNG NHẤT
+ 2  # với ba service kia (payment chưa tham chiếu Shop.Contracts, nhưng giữ cùng một hợp đồng
+ 3  # context để scripts/build-images.sh gọi cả 4 service bằng cùng một dòng lệnh).
+ 4  # Build qua `bash scripts/build-images.sh`.
+ 5  #
+ 6  # TÁI LẬP ĐƯỢC: base ghim bằng DIGEST, NuGet ghim bằng packages.lock.json + locked mode.
+ 7  
+ 8  # --- tầng build: full .NET SDK, ghim digest ---
+ 9  FROM mcr.microsoft.com/dotnet/sdk:10.0@sha256:3dae2f7699441af56216ff64d5c9b6dfce7cd7dc7f4f71d353d29662b10a384f AS build
+10  WORKDIR /src
+11  
+12  # .csproj + packages.lock.json TRƯỚC source: layer restore giữ cache tới khi dependency đổi.
+13  COPY services/payment/payment.csproj services/payment/packages.lock.json services/payment/
+14  # --locked-mode: lockfile lệch csproj thì FAIL build, không âm thầm resolve version khác.
+15  RUN dotnet restore services/payment/payment.csproj --locked-mode
+16  
+17  # Source copy SAU restore.
+18  COPY services/payment/ services/payment/
+19  RUN dotnet publish services/payment/payment.csproj -c Release -o /app/publish --no-restore
+20  
+21  # --- tầng runtime: CHỈ ASP.NET runtime (ghim digest), không SDK, không chạy root ---
+22  FROM mcr.microsoft.com/dotnet/aspnet:10.0@sha256:1f51d2d65ace46d6395e773fb4cfc1c74d36fb4f08e5cf996e7f6961b45e9283 AS runtime
+23  
+24  ARG GIT_SHA
+25  ENV APP_VERSION=${GIT_SHA} \
+26      DOTNET_RUNNING_IN_CONTAINER=true
+27  
+28  LABEL org.opencontainers.image.revision=${GIT_SHA} \
+29        org.opencontainers.image.version=${GIT_SHA} \
+30        org.opencontainers.image.title=starci-shop/payment \
+31        org.opencontainers.image.source=https://github.com/betuanminh22032003/beminhshop
+32  
+33  WORKDIR /app
+34  
+35  # CHỈ mang sang output đã publish — toolchain build ở lại tầng builder.
+36  COPY --from=build /app/publish ./
+37  
+38  # Image aspnet có sẵn user không phải root tên "app".
+39  USER app
+40  EXPOSE 5004
+41  # PORT / SERVICE_NAME đọc từ env lúc chạy; launchSettings.json chỉ dùng cho dev, KHÔNG vào image.
+42  ENTRYPOINT ["dotnet", "payment.dll"]
+```
+
+### `scripts/build-images.sh`
+
+```bash
+ 1  #!/usr/bin/env bash
+ 2  # Phát hành CẢ SHOP dưới dạng bộ image tái lập được.
+ 3  #
+ 4  # Mỗi image được tag bằng ĐÚNG commit sinh ra nó (git SHA ngắn) và tự khai commit đó
+ 5  # trong OCI label org.opencontainers.image.revision. Không có `latest` trôi nổi:
+ 6  # `latest` (nếu có) chỉ là alias trỏ tới tag SHA vừa build.
+ 7  #
+ 8  # Vì sao build lại rất nhanh: Dockerfile copy .csproj + packages.lock.json TRƯỚC source,
+ 9  # nên layer `dotnet restore --locked-mode` giữ cache khi chỉ có code đổi -> lần build thứ
+10  # hai trên cùng một commit in ra CACHED ở layer restore.
+11  #
+12  # Dùng:
+13  #   bash scripts/build-images.sh              # build cả 4 service, tag = SHA ngắn
+14  #   bash scripts/build-images.sh --latest     # thêm alias :latest trỏ cùng image
+15  #
+16  # Chạy hai lần trên cùng một commit ⇒ cùng một bộ triển khai (base ghim digest,
+17  # NuGet ghim lockfile).
+18  set -euo pipefail
+19  
+20  cd "$(dirname "$0")/.."
+21  
+22  if ! GIT_SHA="$(git rev-parse --short HEAD 2>/dev/null)"; then
+23    echo "error: không phải git repo — không có commit thì không tag bất biến được" >&2
+24    exit 1
+25  fi
+26  
+27  # Cây làm việc bẩn = image sẽ KHÔNG khớp commit được tag. Cảnh báo, không chặn (dev tiện).
+28  if ! git diff-index --quiet HEAD --; then
+29    echo "warn: working tree có thay đổi chưa commit — image tag $GIT_SHA sẽ KHÔNG khớp commit đó" >&2
+30  fi
+31  
+32  TAG_LATEST=0
+33  [[ "${1:-}" == "--latest" ]] && TAG_LATEST=1
+34  
+35  # Tên service -> Dockerfile. Cả bốn build với context = GỐC repo (Catalog/Cart/order
+36  # tham chiếu packages/Shop.Contracts; payment giữ cùng hợp đồng cho đồng nhất).
+37  SERVICES=(catalog cart order payment)
+38  DOCKERFILES=(Dockerfile services/Cart/Dockerfile services/order/Dockerfile services/payment/Dockerfile)
+39  
+40  for i in "${!SERVICES[@]}"; do
+41    svc="${SERVICES[$i]}"
+42    dockerfile="${DOCKERFILES[$i]}"
+43    image="starci-shop/${svc}:${GIT_SHA}"
+44  
+45    echo "==> build ${image}  (-f ${dockerfile})"
+46    docker build \
+47      --build-arg "GIT_SHA=${GIT_SHA}" \
+48      -t "${image}" \
+49      -f "${dockerfile}" \
+50      .
+51  
+52    if [[ $TAG_LATEST -eq 1 ]]; then
+53      # latest CHỈ là alias — artifact bất biến vẫn là tag SHA.
+54      docker tag "${image}" "starci-shop/${svc}:latest"
+55      echo "    tagged starci-shop/${svc}:latest -> ${GIT_SHA}"
+56    fi
+57  
+58    echo "    built ${image}"
+59  done
+60  
+61  echo
+62  echo "Bộ image của commit ${GIT_SHA}:"
+63  docker images --filter "reference=starci-shop/*:${GIT_SHA}" \
+64    --format '  {{.Repository}}:{{.Tag}}  {{.Size}}  (id {{.ID}})'
+65  
+66  echo
+67  echo "Kiểm chứng revision nướng trong image:"
+68  for svc in "${SERVICES[@]}"; do
+69    revision="$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+70      "starci-shop/${svc}:${GIT_SHA}")"
+71    echo "  starci-shop/${svc}:${GIT_SHA} -> revision=${revision}"
+72  done
+```
+
+### `services/payment/Program.cs`
+
+```csharp
+placeholder
 ```
 
 ### `services/Cart/Cart.csproj`
 
 ```xml
  1  <Project Sdk="Microsoft.NET.Sdk.Web">
- 2
+ 2  
  3    <PropertyGroup>
  4      <TargetFramework>net10.0</TargetFramework>
  5      <Nullable>enable</Nullable>
  6      <ImplicitUsings>enable</ImplicitUsings>
- 7      <!-- Chốt tên assembly để output publish (Cart.dll) khớp ENTRYPOINT của Dockerfile,
- 8           không phụ thuộc casing thư mục (NTFS case-insensitive). -->
- 9      <AssemblyName>Cart</AssemblyName>
-10    </PropertyGroup>
-11
-12    <ItemGroup>
-13      <ProjectReference Include="..\..\packages\Shop.Contracts\Shop.Contracts.csproj" />
-14    </ItemGroup>
-15
-16  </Project>
+ 7      <!-- Lockfile ĐƯỢC COMMIT (packages.lock.json). Docker restore chạy ở locked mode nên
+ 8           hai lần build cùng một commit luôn kéo đúng cùng một cây NuGet; lockfile lệch
+ 9           csproj thì build FAIL thay vì âm thầm nâng version. -->
+10      <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+11      <!-- Chốt tên assembly để output publish (Cart.dll) khớp ENTRYPOINT của Dockerfile,
+12           không phụ thuộc casing thư mục (NTFS case-insensitive). -->
+13      <AssemblyName>Cart</AssemblyName>
+14    </PropertyGroup>
+15  
+16    <ItemGroup>
+17      <ProjectReference Include="..\..\packages\Shop.Contracts\Shop.Contracts.csproj" />
+18    </ItemGroup>
+19  
+20  </Project>
 ```
 
 ### `services/order/order.csproj`
@@ -1002,35 +1314,46 @@ Bản mẫu commit được. `.env` thật (cùng khoá, giá trị thật) bị
  4      <TargetFramework>net10.0</TargetFramework>
  5      <Nullable>enable</Nullable>
  6      <ImplicitUsings>enable</ImplicitUsings>
- 7      <!-- Chốt tên assembly để output publish (order.dll) khớp ENTRYPOINT của Dockerfile,
- 8           không phụ thuộc casing thư mục (NTFS case-insensitive). -->
- 9      <AssemblyName>order</AssemblyName>
-10    </PropertyGroup>
-11  
-12    <ItemGroup>
-13      <!-- ADO thuần, không EF Core: order chỉ cần ping DB (`SELECT 1`) cho readiness probe. -->
-14      <PackageReference Include="Npgsql" Version="10.0.3" />
-15    </ItemGroup>
-16  
-17    <ItemGroup>
-18      <ProjectReference Include="..\..\packages\Shop.Contracts\Shop.Contracts.csproj" />
+ 7      <!-- Lockfile ĐƯỢC COMMIT (packages.lock.json). Docker restore chạy ở locked mode nên
+ 8           hai lần build cùng một commit luôn kéo đúng cùng một cây NuGet; lockfile lệch
+ 9           csproj thì build FAIL thay vì âm thầm nâng version. -->
+10      <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+11      <!-- Chốt tên assembly để output publish (order.dll) khớp ENTRYPOINT của Dockerfile,
+12           không phụ thuộc casing thư mục (NTFS case-insensitive). -->
+13      <AssemblyName>order</AssemblyName>
+14    </PropertyGroup>
+15  
+16    <ItemGroup>
+17      <!-- ADO thuần, không EF Core: order chỉ cần ping DB (`SELECT 1`) cho readiness probe. -->
+18      <PackageReference Include="Npgsql" Version="10.0.3" />
 19    </ItemGroup>
 20  
-21  </Project>
+21    <ItemGroup>
+22      <ProjectReference Include="..\..\packages\Shop.Contracts\Shop.Contracts.csproj" />
+23    </ItemGroup>
+24  
+25  </Project>
 ```
 
 ### `services/payment/payment.csproj`
 
 ```xml
-1  <Project Sdk="Microsoft.NET.Sdk.Web">
-2
-3    <PropertyGroup>
-4      <TargetFramework>net10.0</TargetFramework>
-5      <Nullable>enable</Nullable>
-6      <ImplicitUsings>enable</ImplicitUsings>
-7    </PropertyGroup>
-8
-9  </Project>
+ 1  <Project Sdk="Microsoft.NET.Sdk.Web">
+ 2  
+ 3    <PropertyGroup>
+ 4      <TargetFramework>net10.0</TargetFramework>
+ 5      <Nullable>enable</Nullable>
+ 6      <ImplicitUsings>enable</ImplicitUsings>
+ 7      <!-- Lockfile ĐƯỢC COMMIT (packages.lock.json). Docker restore chạy ở locked mode nên
+ 8           hai lần build cùng một commit luôn kéo đúng cùng một cây NuGet; lockfile lệch
+ 9           csproj thì build FAIL thay vì âm thầm nâng version. -->
+10      <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+11      <!-- Chốt tên assembly để output publish (payment.dll) khớp ENTRYPOINT của Dockerfile,
+12           không phụ thuộc casing thư mục (NTFS case-insensitive) — cùng lý do như order. -->
+13      <AssemblyName>payment</AssemblyName>
+14    </PropertyGroup>
+15  
+16  </Project>
 ```
 
 ### `starci-shop.slnx`
