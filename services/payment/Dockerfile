@@ -1,6 +1,7 @@
-# Dockerfile ĐA TẦNG cho service Cart (.NET). Build context = GỐC repo
-# (Cart tham chiếu packages/Shop.Contracts). Build qua `bash scripts/build-images.sh`
-# để tag theo git SHA; docker-compose.yaml khai đúng cặp context: . / dockerfile: services/Cart/Dockerfile.
+# Dockerfile ĐA TẦNG cho service payment (.NET). Build context = GỐC repo cho ĐỒNG NHẤT
+# với ba service kia (payment chưa tham chiếu Shop.Contracts, nhưng giữ cùng một hợp đồng
+# context để scripts/build-images.sh gọi cả 4 service bằng cùng một dòng lệnh).
+# Build qua `bash scripts/build-images.sh`.
 #
 # TÁI LẬP ĐƯỢC: base ghim bằng DIGEST, NuGet ghim bằng packages.lock.json + locked mode.
 
@@ -9,15 +10,13 @@ FROM mcr.microsoft.com/dotnet/sdk:10.0@sha256:3dae2f7699441af56216ff64d5c9b6dfce
 WORKDIR /src
 
 # .csproj + packages.lock.json TRƯỚC source: layer restore giữ cache tới khi dependency đổi.
-COPY packages/Shop.Contracts/Shop.Contracts.csproj packages/Shop.Contracts/packages.lock.json packages/Shop.Contracts/
-COPY services/Cart/Cart.csproj services/Cart/packages.lock.json services/Cart/
+COPY services/payment/payment.csproj services/payment/packages.lock.json services/payment/
 # --locked-mode: lockfile lệch csproj thì FAIL build, không âm thầm resolve version khác.
-RUN dotnet restore services/Cart/Cart.csproj --locked-mode
+RUN dotnet restore services/payment/payment.csproj --locked-mode
 
 # Source copy SAU restore.
-COPY packages/Shop.Contracts/ packages/Shop.Contracts/
-COPY services/Cart/ services/Cart/
-RUN dotnet publish services/Cart/Cart.csproj -c Release -o /app/publish --no-restore
+COPY services/payment/ services/payment/
+RUN dotnet publish services/payment/payment.csproj -c Release -o /app/publish --no-restore
 
 # --- tầng runtime: CHỈ ASP.NET runtime (ghim digest), không SDK, không chạy root ---
 FROM mcr.microsoft.com/dotnet/aspnet:10.0@sha256:1f51d2d65ace46d6395e773fb4cfc1c74d36fb4f08e5cf996e7f6961b45e9283 AS runtime
@@ -28,7 +27,7 @@ ENV APP_VERSION=${GIT_SHA} \
 
 LABEL org.opencontainers.image.revision=${GIT_SHA} \
       org.opencontainers.image.version=${GIT_SHA} \
-      org.opencontainers.image.title=starci-shop/cart \
+      org.opencontainers.image.title=starci-shop/payment \
       org.opencontainers.image.source=https://github.com/betuanminh22032003/beminhshop
 
 WORKDIR /app
@@ -38,6 +37,6 @@ COPY --from=build /app/publish ./
 
 # Image aspnet có sẵn user không phải root tên "app".
 USER app
-EXPOSE 3002
-# PORT / CATALOG_URL / DATABASE_URL đọc từ env lúc chạy (không nướng vào image).
-ENTRYPOINT ["dotnet", "Cart.dll"]
+EXPOSE 5004
+# PORT / SERVICE_NAME đọc từ env lúc chạy; launchSettings.json chỉ dùng cho dev, KHÔNG vào image.
+ENTRYPOINT ["dotnet", "payment.dll"]

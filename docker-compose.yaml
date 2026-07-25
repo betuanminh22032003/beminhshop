@@ -36,6 +36,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # Compose là đường dev: image mang nhãn "dev" cho RÕ RÀNG, không giả một SHA.
+        # Artifact phát hành bất biến sinh bằng `bash scripts/build-images.sh` (tag = git SHA).
+        GIT_SHA: ${GIT_SHA:-dev}
     environment:
       PORT: 3001
       SERVICE_NAME: catalog
@@ -53,6 +57,10 @@ services:
     build:
       context: .
       dockerfile: services/Cart/Dockerfile
+      args:
+        # Compose là đường dev: image mang nhãn "dev" cho RÕ RÀNG, không giả một SHA.
+        # Artifact phát hành bất biến sinh bằng `bash scripts/build-images.sh` (tag = git SHA).
+        GIT_SHA: ${GIT_SHA:-dev}
     environment:
       PORT: 3002
       SERVICE_NAME: cart
@@ -71,6 +79,10 @@ services:
     build:
       context: .
       dockerfile: services/order/Dockerfile
+      args:
+        # Compose là đường dev: image mang nhãn "dev" cho RÕ RÀNG, không giả một SHA.
+        # Artifact phát hành bất biến sinh bằng `bash scripts/build-images.sh` (tag = git SHA).
+        GIT_SHA: ${GIT_SHA:-dev}
     environment:
       PORT: 3003
       SERVICE_NAME: order

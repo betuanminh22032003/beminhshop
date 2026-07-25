@@ -4,6 +4,10 @@
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
+    <!-- Lockfile ĐƯỢC COMMIT (packages.lock.json). Docker restore chạy ở locked mode nên
+         hai lần build cùng một commit luôn kéo đúng cùng một cây NuGet; lockfile lệch
+         csproj thì build FAIL thay vì âm thầm nâng version. -->
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
   </PropertyGroup>
 
 </Project>

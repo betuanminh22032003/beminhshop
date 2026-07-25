@@ -1,25 +1,36 @@
 # Dockerfile ĐA TẦNG cho service order (.NET). Build context = GỐC repo
-# (order tham chiếu packages/Shop.Contracts):
-#   docker build -f services/order/Dockerfile -t starci-shop/order:slim .
-# docker-compose.yaml khai đúng cặp context: . / dockerfile: services/order/Dockerfile.
+# (order tham chiếu packages/Shop.Contracts). Build qua `bash scripts/build-images.sh`
+# để tag theo git SHA; docker-compose.yaml khai đúng cặp context: . / dockerfile: services/order/Dockerfile.
+#
+# TÁI LẬP ĐƯỢC: base ghim bằng DIGEST, NuGet ghim bằng packages.lock.json + locked mode.
 
-# --- tầng build: full .NET SDK, restore + publish ---
-FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+# --- tầng build: full .NET SDK, ghim digest ---
+FROM mcr.microsoft.com/dotnet/sdk:10.0@sha256:3dae2f7699441af56216ff64d5c9b6dfce7cd7dc7f4f71d353d29662b10a384f AS build
 WORKDIR /src
 
-# Copy .csproj và restore TRƯỚC khi copy source (tận dụng layer cache).
-COPY packages/Shop.Contracts/Shop.Contracts.csproj packages/Shop.Contracts/
-COPY services/order/order.csproj services/order/
-RUN dotnet restore services/order/order.csproj
+# .csproj + packages.lock.json TRƯỚC source: layer restore giữ cache tới khi dependency đổi.
+COPY packages/Shop.Contracts/Shop.Contracts.csproj packages/Shop.Contracts/packages.lock.json packages/Shop.Contracts/
+COPY services/order/order.csproj services/order/packages.lock.json services/order/
+# --locked-mode: lockfile lệch csproj thì FAIL build, không âm thầm resolve version khác.
+RUN dotnet restore services/order/order.csproj --locked-mode
 
-# Copy source rồi publish ra /app/publish.
+# Source copy SAU restore.
 COPY packages/Shop.Contracts/ packages/Shop.Contracts/
 COPY services/order/ services/order/
 RUN dotnet publish services/order/order.csproj -c Release -o /app/publish --no-restore
 
-# --- tầng runtime: CHỈ ASP.NET runtime, không SDK, không chạy root ---
-FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
-ENV DOTNET_RUNNING_IN_CONTAINER=true
+# --- tầng runtime: CHỈ ASP.NET runtime (ghim digest), không SDK, không chạy root ---
+FROM mcr.microsoft.com/dotnet/aspnet:10.0@sha256:1f51d2d65ace46d6395e773fb4cfc1c74d36fb4f08e5cf996e7f6961b45e9283 AS runtime
+
+ARG GIT_SHA
+ENV APP_VERSION=${GIT_SHA} \
+    DOTNET_RUNNING_IN_CONTAINER=true
+
+LABEL org.opencontainers.image.revision=${GIT_SHA} \
+      org.opencontainers.image.version=${GIT_SHA} \
+      org.opencontainers.image.title=starci-shop/order \
+      org.opencontainers.image.source=https://github.com/betuanminh22032003/beminhshop
+
 WORKDIR /app
 
 # curl là công cụ DUY NHẤT thêm vào runtime, để HEALTHCHECK tự thăm dò /health được.
