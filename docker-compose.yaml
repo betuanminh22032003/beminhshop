@@ -1,0 +1,92 @@
+# Cả shop bằng MỘT lệnh: docker compose up --build
+#
+# - Secret KHÔNG nằm trong file này: mọi ${VAR} được compose nạp từ .env (gitignored),
+#   .env.example là bản mẫu có thể commit.
+# - Service tìm nhau qua DNS THEO TÊN SERVICE trên mạng shopnet (db, catalog, cart),
+#   không localhost, không IP cứng — bridge mặc định không phân giải tên nên shopnet
+#   phải được khai báo tường minh.
+# - Dữ liệu Postgres nằm trên named volume pgdata nên sản phẩm đã seed sống sót qua
+#   docker compose down && docker compose up (KHÔNG dùng `down -v`).
+# - Mỗi service build từ Dockerfile riêng nhưng context là GỐC repo, vì cả ba tham
+#   chiếu packages/Shop.Contracts.
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      # Named volume -> dữ liệu sống lâu hơn container.
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - shopnet
+    healthcheck:
+      # depends_on: service_healthy của app dựa vào chính healthcheck này.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  catalog:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      PORT: 3001
+      SERVICE_NAME: catalog
+      # host là "db" — tên service trong compose, do DNS của shopnet phân giải.
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:${POSTGRES_PORT}/${POSTGRES_DB}
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "3001:3001"
+    networks:
+      - shopnet
+
+  cart:
+    build:
+      context: .
+      dockerfile: services/Cart/Dockerfile
+    environment:
+      PORT: 3002
+      SERVICE_NAME: cart
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:${POSTGRES_PORT}/${POSTGRES_DB}
+      # Lưu lượng service→service cũng đi bằng DNS theo tên service.
+      CATALOG_URL: http://catalog:3001
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "3002:3002"
+    networks:
+      - shopnet
+
+  order:
+    build:
+      context: .
+      dockerfile: services/order/Dockerfile
+    environment:
+      PORT: 3003
+      SERVICE_NAME: order
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:${POSTGRES_PORT}/${POSTGRES_DB}
+      CATALOG_URL: http://catalog:3001
+      CART_URL: http://cart:3002
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "3003:3003"
+    networks:
+      - shopnet
+
+networks:
+  # Mạng do người dùng định nghĩa = có DNS nội bộ theo tên service.
+  shopnet:
+    driver: bridge
+
+volumes:
+  # Khai báo một lần ở cấp cao nhất: Docker quản lý vòng đời volume độc lập với container.
+  pgdata:

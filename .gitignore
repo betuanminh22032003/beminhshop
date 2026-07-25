@@ -2,5 +2,7 @@ bin/
 obj/
 *.user
 *.log
+# Secret của compose ở .env — KHÔNG commit. Chỉ .env.example (placeholder) được commit.
 .env
 .env.*
+!.env.example

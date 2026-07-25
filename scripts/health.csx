@@ -3,11 +3,13 @@
 // thoát mã khác 0 nếu bất kỳ service nào down.
 using System.Net.Http;
 
+// 127.0.0.1 chứ KHÔNG "localhost": cả ba service bind 0.0.0.0 (IPv4, để container reachable qua -p),
+// còn "localhost" trên Windows phân giải ::1 trước -> HttpClient treo tới timeout dù service vẫn sống.
 var targets = new (string Name, string Url)[]
 {
-    ("catalog", "http://localhost:5001/health"),
-    ("cart", "http://localhost:5002/health"),
-    ("order", "http://localhost:5003/health"),
+    ("catalog", "http://127.0.0.1:5001/health"),
+    ("cart", "http://127.0.0.1:5002/health"),
+    ("order", "http://127.0.0.1:5003/health"),
 };
 
 // NB: 'using var' ở top-level bị dotnet-script parse nhầm thành using-directive → dùng var thường.

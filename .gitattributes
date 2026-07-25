@@ -6,3 +6,8 @@ scripts/*.sh text eol=lf
 # nối dòng `\` và tham số ENTRYPOINT/CMD.
 Dockerfile text eol=lf
 Dockerfile.* text eol=lf
+
+# File compose + mẫu env cũng do Docker (Linux) đọc: giữ LF cho chắc
+# (chuỗi test của healthcheck chạy qua CMD-SHELL trong container).
+docker-compose.yaml text eol=lf
+.env.example text eol=lf

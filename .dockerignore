@@ -7,3 +7,8 @@
 *.user
 *.log
 scripts/
+
+# Secret và file compose không cần vào build context của image.
+.env
+.env.*
+docker-compose.yaml

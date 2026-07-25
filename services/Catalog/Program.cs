@@ -13,15 +13,19 @@ var app = builder.Build();
 app.MapGet("/health", () => Results.Ok(HealthResponse.Ok(config.ServiceName)))
    .AllowAnonymous();
 
-// Danh sách sản phẩm đã seed — shape { items, total }.
-var products = new[]
+// Sản phẩm sống trong Postgres — host là TÊN SERVICE compose ("db"), dữ liệu trên named volume
+// pgdata nên còn nguyên sau docker compose down && up. Seed chỉ chạy khi bảng còn rỗng.
+var store = new ProductStore(config.DatabaseUrl);
+Console.WriteLine($"[{config.ServiceName}] catalog db = {config.DatabaseUrl}");
+await store.InitializeAsync();
+
+// Shape giữ nguyên { items, total } — hợp đồng đã chốt từ milestone container.
+app.MapGet("/products", async () =>
 {
-    new { id = "sku-001", title = "Starter Mug", priceCents = 1200 },
-    new { id = "sku-002", title = "Field Notebook", priceCents = 800 },
-    new { id = "sku-003", title = "Enamel Pin", priceCents = 500 },
-};
-app.MapGet("/products", () => new { items = products, total = products.Length });
+    var items = await store.ListAsync();
+    return new { items, total = items.Count };
+});
 
 Console.WriteLine($"[{config.ServiceName}] listening on :{config.Port}");
-Console.WriteLine($"[{config.ServiceName}] catalog db = {config.DatabaseUrl}");
+Console.WriteLine($"[{config.ServiceName}] products source = {(store.UsesDatabase ? "postgres" : "in-memory seed")}");
 app.Run();
