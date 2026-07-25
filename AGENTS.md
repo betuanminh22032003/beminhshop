@@ -14,7 +14,7 @@ Dockerfile.single       # bản đơn tầng cũ, GIỮ LẠI chỉ để so kí
 .dockerignore           # giữ build context gọn (bin/obj/.git/*.log/scripts/.env)
 docker-compose.yaml     # CẢ SHOP 1 lệnh: db(postgres:16-alpine) + catalog:3001 + cart:3002 + order:3003
 .env / .env.example     # secret Postgres cho compose — .env GITIGNORED, .env.example là mẫu commit được
-scripts/                 # dev.sh (dựng Catalog+Cart+order cùng lúc), health.csx (probe /health), build-images.sh (PHÁT HÀNH 4 image tag = git SHA)
+scripts/                 # dev.sh (dựng Catalog+Cart+order cùng lúc), health.csx (probe /health), build-images.sh (PHÁT HÀNH 4 image tag = git SHA), verify-reproducible.sh (ASSERT tính tái lập)
 services/
   Catalog/               # sản phẩm         (:5001 mặc định — PORT/SERVICE_NAME/DATABASE_URL từ env, Dockerized, /products đọc Postgres)
   Cart/                  # giỏ hàng         (:5002 mặc định — PORT/SERVICE_NAME/CATALOG_URL từ env, Dockerized)
@@ -40,6 +40,8 @@ Mỗi service: một `.csproj` (`Microsoft.NET.Sdk.Web`, `net10.0`) + `Program.c
 - **NuGet ghim bằng `packages.lock.json` đã commit** (`RestorePackagesWithLockFile` trong cả 5 `.csproj`) và Docker restore chạy **`--locked-mode`**. Thêm/đổi package ⇒ **phải `dotnet restore` ở local và commit lockfile mới**, nếu không Docker build FAIL với `NU1004` (đã kiểm chứng thật). Đó là tính năng, không phải lỗi.
 - **Thứ tự layer là hợp đồng:** `.csproj` + `packages.lock.json` copy TRƯỚC source, `dotnet publish --no-restore` sau. Đảo thứ tự này là giết cache (mỗi lần sửa `.cs` phải restore lại).
 - **`ARG GIT_SHA` KHÔNG có default** → `ENV APP_VERSION` + `LABEL org.opencontainers.image.revision/version`. Đừng thêm default `latest`/`dev` vào Dockerfile: build thiếu ARG phải lộ ra, không được dán nhãn sai.
+- **Bốn Dockerfile, đường dẫn KHÔNG đối xứng:** catalog ở **`/Dockerfile`** (GỐC repo — di sản milestone 0, kiểm chứng bài đó chạy `docker build .`), còn `services/Cart/Dockerfile`, `services/order/Dockerfile`, `services/payment/Dockerfile` nằm cạnh source. Đừng đi tìm `services/Catalog/Dockerfile` — không có file đó.
+- **Kiểm chứng bằng `bash scripts/verify-reproducible.sh`** (25 assert: digest ghim, USER non-root, runtime không SDK, locked-mode, thứ tự layer, lockfile đã commit, label revision == HEAD, config digest bằng nhau qua hai lần build). Exit≠0 nếu sai — chạy nó sau MỌI thay đổi Dockerfile/csproj.
 - **Phát hành = `bash scripts/build-images.sh`** (tag `starci-shop/<svc>:<git-sha-ngắn>` cho cả 4 service). `--latest` chỉ tạo **alias** trỏ tag SHA; artifact bất biến luôn là SHA. Đừng `docker build` tay rồi tag `latest`.
 - Giới hạn đã biết: `.Id` (manifest **list**) đổi mỗi build vì buildx attestation có timestamp; **image config digest** thì bất biến. Muốn `.Id` bất biến nữa thì `--provenance=false --sbom=false` hoặc `SOURCE_DATE_EPOCH` — chưa làm vì task không đòi.
 
@@ -63,6 +65,7 @@ dotnet build services/Catalog                 # build 1 service độc lập (ch
 dotnet run --project services/Catalog         # chạy Catalog (đọc PORT env, mặc định 5001)
 dotnet sln list                               # xác nhận đủ 5 project (4 service + Shop.Contracts)
 bash scripts/build-images.sh                  # PHÁT HÀNH: build CẢ 4 image, tag = git SHA ngắn (--latest chỉ thêm alias)
+bash scripts/verify-reproducible.sh           # ASSERT tái lập cho cả 4 service (25 check), exit≠0 nếu sai
 docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' starci-shop/catalog:$(git rev-parse --short HEAD)  # -> SHA ngắn
 docker build -t starci-shop/catalog:slim .    # đóng gói Catalog ĐA TẦNG (Dockerfile ở GỐC; context=gốc vì cần Shop.Contracts)
 docker build -f Dockerfile.single -t catalog:single .  # bản đơn tầng cũ — chỉ để so kích thước

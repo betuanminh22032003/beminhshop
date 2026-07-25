@@ -256,7 +256,45 @@ Một lệnh phát hành **cả bốn** service — catalog, cart, order **và p
 ```bash
 bash scripts/build-images.sh              # tag = git SHA ngắn
 bash scripts/build-images.sh --latest     # thêm alias :latest trỏ đúng image đó
+bash scripts/verify-reproducible.sh       # ASSERT tính tái lập cho cả 4 service, exit≠0 nếu sai
 ```
+
+### Bốn service, bốn Dockerfile — đường dẫn chính xác
+
+⚠️ **Dockerfile của Catalog nằm ở GỐC repo**, KHÔNG phải `services/Catalog/Dockerfile` — đó là di sản từ milestone 0 (kiểm chứng của bài đó chạy `docker build .` với Dockerfile mặc định ở gốc) và được giữ để không phá lệnh cũ. Ba service còn lại nằm cạnh source của chúng:
+
+| Service | Dockerfile | Base ghim digest (build / runtime) | Non-root | Lockfile restore ở `--locked-mode` |
+|---|---|---|---|---|
+| catalog | **`/Dockerfile`** (gốc repo) | `sdk:10.0@sha256:3dae2f76…` / `aspnet:10.0@sha256:1f51d2d6…` | `USER app` | `packages/Shop.Contracts/packages.lock.json` + `services/Catalog/packages.lock.json` |
+| cart | `services/Cart/Dockerfile` | cùng hai digest trên | `USER app` | `Shop.Contracts` + `services/Cart/packages.lock.json` |
+| order | `services/order/Dockerfile` | cùng hai digest trên | `USER app` | `Shop.Contracts` + `services/order/packages.lock.json` |
+| payment | `services/payment/Dockerfile` | cùng hai digest trên | `USER app` | `services/payment/packages.lock.json` |
+
+`services/payment/Dockerfile` là file MỚI ở milestone này (trước đó payment chưa được đóng gói). Các dòng quyết định của nó — giống hệt khuôn ba service kia:
+
+```dockerfile
+FROM mcr.microsoft.com/dotnet/sdk:10.0@sha256:3dae2f7699441af56216ff64d5c9b6dfce7cd7dc7f4f71d353d29662b10a384f AS build
+WORKDIR /src
+COPY services/payment/payment.csproj services/payment/packages.lock.json services/payment/
+RUN dotnet restore services/payment/payment.csproj --locked-mode
+COPY services/payment/ services/payment/
+RUN dotnet publish services/payment/payment.csproj -c Release -o /app/publish --no-restore
+
+FROM mcr.microsoft.com/dotnet/aspnet:10.0@sha256:1f51d2d65ace46d6395e773fb4cfc1c74d36fb4f08e5cf996e7f6961b45e9283 AS runtime
+ARG GIT_SHA
+ENV APP_VERSION=${GIT_SHA} \
+    DOTNET_RUNNING_IN_CONTAINER=true
+LABEL org.opencontainers.image.revision=${GIT_SHA} \
+      org.opencontainers.image.version=${GIT_SHA} \
+      org.opencontainers.image.title=starci-shop/payment
+WORKDIR /app
+COPY --from=build /app/publish ./
+USER app
+EXPOSE 5004
+ENTRYPOINT ["dotnet", "payment.dll"]
+```
+
+**Không có dependency trôi nổi, cho cả 4 service.** Mọi `PackageReference` bị khoá bởi `packages.lock.json` **đã commit** (5 file, một cho mỗi project), và Docker restore chạy `--locked-mode` nên lockfile lệch csproj là **build FAIL** chứ không phải resolve version khác. Catalog và order khai `Npgsql 10.0.3`; Cart, payment và Shop.Contracts không có PackageReference nào (lockfile rỗng dependency — nên hai file đó cùng sha256). **Không có `latest` nào trong đường phát hành:** cả 4 tag là `starci-shop/<svc>:<git-sha>`; `--latest` chỉ chạy `docker tag` tạo alias trỏ đúng image SHA đó.
 
 Bốn thứ khoá chặt "cùng một commit ⇒ cùng một bộ triển khai":
 
@@ -268,6 +306,61 @@ Bốn thứ khoá chặt "cùng một commit ⇒ cùng một bộ triển khai":
 | Tốc độ build lại | `.csproj` + `packages.lock.json` copy **trước** source | sửa một dòng `.cs` là restore lại toàn bộ NuGet |
 
 `ARG GIT_SHA` **không có default**: build thiếu ARG thì version rỗng và lộ ra ngay, thay vì dán nhãn sai một image. `latest` chỉ là **alias** (`docker tag`) — artifact bất biến luôn là tag SHA.
+
+### Kiểm chứng TỰ ĐỘNG — `bash scripts/verify-reproducible.sh`
+
+Không phải lời hứa trong doc: script build hai lần rồi **assert** từng điều, exit≠0 nếu sai. Output thật trên commit `4683c5a` (25/25 PASS):
+
+```
+commit under test: 4683c5a
+
+=== Dockerfile checks (4/4 service) ===
+[catalog] Dockerfile
+  PASS  catalog: 2/2 FROM ghim @sha256 (build + runtime)
+  PASS  catalog: có USER (không chạy root)
+  PASS  catalog: runtime base = aspnet (không SDK)
+  PASS  catalog: restore ở --locked-mode
+  PASS  catalog: lockfile(L7) -> restore(L18) -> source(L22)
+[cart] services/Cart/Dockerfile
+  PASS  cart: 2/2 FROM ghim @sha256 (build + runtime)   ... (5/5 PASS)
+[order] services/order/Dockerfile
+  PASS  order: 2/2 FROM ghim @sha256 (build + runtime)  ... (5/5 PASS)
+[payment] services/payment/Dockerfile
+  PASS  payment: 2/2 FROM ghim @sha256 (build + runtime)
+  PASS  payment: có USER (không chạy root)
+  PASS  payment: runtime base = aspnet (không SDK)
+  PASS  payment: restore ở --locked-mode
+  PASS  payment: lockfile(L6) -> restore(L15) -> source(L18)
+
+=== Dependency set khoá bằng lockfile đã commit (không floating) ===
+  [catalog] a4364d81a6de2707…  packages/Shop.Contracts/packages.lock.json  (committed)
+  [catalog] d5f352be869aaee2…  services/Catalog/packages.lock.json         (committed)
+  [cart]    693b3b88bbf6563d…  services/Cart/packages.lock.json            (committed)
+  [order]   d5f352be869aaee2…  services/order/packages.lock.json           (committed)
+  [payment] a4364d81a6de2707…  services/payment/packages.lock.json         (committed)
+
+=== Build lần 2 (cùng commit) ===
+  PASS  catalog: layer restore CACHED ở lần build thứ hai
+  PASS  cart:    layer restore CACHED ở lần build thứ hai
+  PASS  order:   layer restore CACHED ở lần build thứ hai
+  PASS  payment: layer restore CACHED ở lần build thứ hai
+
+=== Label revision == git SHA (4/4 service) ===
+  PASS  catalog: revision=4683c5a
+  PASS  cart:    revision=4683c5a
+  PASS  order:   revision=4683c5a
+  PASS  payment: revision=4683c5a
+
+=== Hai lần build -> CÙNG image config digest (4/4 service) ===
+  PASS  catalog: sha256:b335b348d192e7c97cd… giống nhau ở cả hai lần build
+  PASS  cart:    sha256:df639e0af5b3c51cf06… giống nhau ở cả hai lần build
+  PASS  order:   sha256:b7179fc0db667bb7b38… giống nhau ở cả hai lần build
+  PASS  payment: sha256:db45e544fc00bf1f68f… giống nhau ở cả hai lần build
+
+OK — bộ image của commit 4683c5a tái lập được (cả 4 service).
+```
+
+Đó là bằng chứng trực tiếp cho "cùng commit ⇒ image functionally identical" **ở cả bốn service, payment bao gồm**: cùng label `revision`, cùng dependency set (lockfile đã commit, restore locked), cùng image config digest.
 
 ### Kiểm chứng chạy thật (Docker 29.2.1, commit `a4d865a`)
 
@@ -1195,6 +1288,155 @@ Bản mẫu commit được. `.env` thật (cùng khoá, giá trị thật) bị
 40  EXPOSE 5004
 41  # PORT / SERVICE_NAME đọc từ env lúc chạy; launchSettings.json chỉ dùng cho dev, KHÔNG vào image.
 42  ENTRYPOINT ["dotnet", "payment.dll"]
+```
+
+### `scripts/verify-reproducible.sh`
+
+```bash
+  1  #!/usr/bin/env bash
+  2  # Kiểm chứng TỰ ĐỘNG rằng bộ image của shop là tái lập được — cho CẢ BỐN service.
+  3  #
+  4  # Script này không tin lời hứa trong doc; nó build hai lần trên cùng một commit rồi
+  5  # assert từng điều một, và exit != 0 nếu bất kỳ điều nào sai:
+  6  #
+  7  #   1. Base image ghim bằng DIGEST (@sha256:) — cả tầng build lẫn tầng runtime, không tag trần.
+  8  #   2. Tầng runtime KHÔNG chạy root (có USER) và KHÔNG mang SDK.
+  9  #   3. Restore chạy ở --locked-mode, và .csproj + packages.lock.json copy TRƯỚC source.
+ 10  #   4. Label org.opencontainers.image.revision == git SHA ngắn của HEAD.
+ 11  #   5. Không có dependency trôi nổi: dependency set khoá trong packages.lock.json đã commit
+ 12  #      (in ra sha256 của lockfile để so được giữa hai lần build / hai máy).
+ 13  #   6. Build lần hai cho ra CÙNG image config digest (functionally identical image).
+ 14  #
+ 15  # Dùng: bash scripts/verify-reproducible.sh
+ 16  set -uo pipefail
+ 17  cd "$(dirname "$0")/.."
+ 18  
+ 19  SERVICES=(catalog cart order payment)
+ 20  DOCKERFILES=(Dockerfile services/Cart/Dockerfile services/order/Dockerfile services/payment/Dockerfile)
+ 21  # Lockfile mà mỗi service restore (payment không tham chiếu Shop.Contracts).
+ 22  LOCKFILES=(
+ 23    "packages/Shop.Contracts/packages.lock.json services/Catalog/packages.lock.json"
+ 24    "packages/Shop.Contracts/packages.lock.json services/Cart/packages.lock.json"
+ 25    "packages/Shop.Contracts/packages.lock.json services/order/packages.lock.json"
+ 26    "services/payment/packages.lock.json"
+ 27  )
+ 28  
+ 29  GIT_SHA="$(git rev-parse --short HEAD)"
+ 30  FAILED=0
+ 31  
+ 32  pass() { echo "  PASS  $1"; }
+ 33  fail() { echo "  FAIL  $1"; FAILED=1; }
+ 34  
+ 35  echo "commit under test: ${GIT_SHA}"
+ 36  echo
+ 37  
+ 38  # ---------- 1..3: kiểm tra tĩnh từng Dockerfile ----------
+ 39  echo "=== Dockerfile checks (4/4 service) ==="
+ 40  for i in "${!SERVICES[@]}"; do
+ 41    svc="${SERVICES[$i]}"; df="${DOCKERFILES[$i]}"
+ 42    echo "[${svc}] ${df}"
+ 43  
+ 44    [[ -f "$df" ]] || { fail "${svc}: Dockerfile không tồn tại"; continue; }
+ 45  
+ 46    # 1. mọi FROM phải ghim digest
+ 47    from_lines="$(grep -c '^FROM ' "$df")"
+ 48    pinned="$(grep -c '^FROM .*@sha256:' "$df")"
+ 49    if [[ "$from_lines" -eq "$pinned" && "$pinned" -ge 2 ]]; then
+ 50      pass "${svc}: ${pinned}/${from_lines} FROM ghim @sha256 (build + runtime)"
+ 51    else
+ 52      fail "${svc}: chỉ ${pinned}/${from_lines} FROM ghim digest — còn tag trôi nổi"
+ 53    fi
+ 54  
+ 55    # 2. runtime không root, và runtime base là aspnet (không SDK)
+ 56    grep -q '^USER ' "$df" && pass "${svc}: có USER (không chạy root)" \
+ 57                          || fail "${svc}: thiếu USER — tầng runtime chạy root"
+ 58    grep -q '^FROM mcr.microsoft.com/dotnet/aspnet.* AS runtime' "$df" \
+ 59      && pass "${svc}: runtime base = aspnet (không SDK)" \
+ 60      || fail "${svc}: runtime base không phải aspnet"
+ 61  
+ 62    # 3. locked mode + thứ tự layer: restore phải nằm TRƯỚC dòng COPY source
+ 63    grep -q 'dotnet restore .*--locked-mode' "$df" \
+ 64      && pass "${svc}: restore ở --locked-mode" \
+ 65      || fail "${svc}: restore KHÔNG dùng --locked-mode"
+ 66  
+ 67    restore_ln="$(grep -n 'dotnet restore' "$df" | head -1 | cut -d: -f1)"
+ 68    lock_ln="$(grep -n 'packages.lock.json' "$df" | head -1 | cut -d: -f1)"
+ 69    src_ln="$(grep -n '^COPY services/.*/ services/' "$df" | head -1 | cut -d: -f1)"
+ 70    if [[ -n "$restore_ln" && -n "$lock_ln" && -n "$src_ln" \
+ 71          && "$lock_ln" -lt "$restore_ln" && "$restore_ln" -lt "$src_ln" ]]; then
+ 72      pass "${svc}: lockfile(L${lock_ln}) -> restore(L${restore_ln}) -> source(L${src_ln})"
+ 73    else
+ 74      fail "${svc}: thứ tự layer sai (lockfile=${lock_ln} restore=${restore_ln} source=${src_ln})"
+ 75    fi
+ 76    echo
+ 77  done
+ 78  
+ 79  # ---------- 5: dependency set khoá bằng lockfile đã commit ----------
+ 80  echo "=== Dependency set khoá bằng lockfile đã commit (không floating) ==="
+ 81  for i in "${!SERVICES[@]}"; do
+ 82    svc="${SERVICES[$i]}"
+ 83    for lf in ${LOCKFILES[$i]}; do
+ 84      if [[ ! -f "$lf" ]]; then fail "${svc}: thiếu ${lf}"; continue; fi
+ 85      if ! git ls-files --error-unmatch "$lf" >/dev/null 2>&1; then
+ 86        fail "${svc}: ${lf} CHƯA được commit"; continue
+ 87      fi
+ 88      echo "  [${svc}] $(sha256sum "$lf" | cut -c1-16)…  ${lf}  (committed)"
+ 89    done
+ 90  done
+ 91  echo
+ 92  
+ 93  # ---------- 4 + 6: build hai lần, so label và config digest ----------
+ 94  build_all() { # $1 = tên vòng, ghi config digest ra file $2
+ 95    local round="$1" out="$2"
+ 96    : > "$out"
+ 97    for i in "${!SERVICES[@]}"; do
+ 98      local svc="${SERVICES[$i]}" df="${DOCKERFILES[$i]}"
+ 99      local log; log="$(mktemp)"
+100      docker build --build-arg "GIT_SHA=${GIT_SHA}" \
+101        -t "starci-shop/${svc}:${GIT_SHA}" -f "$df" . >"$log" 2>&1 \
+102        || { fail "${svc}: docker build thất bại (${round})"; tail -5 "$log"; }
+103      # config digest = danh tính NỘI DUNG image (khác .Id của manifest list, thứ mang timestamp attestation)
+104      echo "${svc} $(grep -o 'exporting config sha256:[a-f0-9]*' "$log" | tail -1 | awk '{print $3}')" >> "$out"
+105      if [[ "$round" == "run2" ]]; then
+106        grep -A1 'RUN dotnet restore' "$log" | grep -q CACHED \
+107          && pass "${svc}: layer restore CACHED ở lần build thứ hai" \
+108          || fail "${svc}: layer restore KHÔNG cached — cache lockfile-first bị vỡ"
+109      fi
+110      rm -f "$log"
+111    done
+112  }
+113  
+114  echo "=== Build lần 1 ==="
+115  build_all run1 /tmp/repro-run1.txt
+116  echo "=== Build lần 2 (cùng commit) ==="
+117  build_all run2 /tmp/repro-run2.txt
+118  echo
+119  
+120  echo "=== Label revision == git SHA (4/4 service) ==="
+121  for svc in "${SERVICES[@]}"; do
+122    got="$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+123      "starci-shop/${svc}:${GIT_SHA}" 2>/dev/null)"
+124    [[ "$got" == "$GIT_SHA" ]] \
+125      && pass "${svc}: revision=${got}" \
+126      || fail "${svc}: revision=${got:-<rỗng>} (mong đợi ${GIT_SHA})"
+127  done
+128  echo
+129  
+130  echo "=== Hai lần build -> CÙNG image config digest (4/4 service) ==="
+131  while read -r svc digest; do
+132    d2="$(grep "^${svc} " /tmp/repro-run2.txt | awk '{print $2}')"
+133    [[ -n "$digest" && "$digest" == "$d2" ]] \
+134      && pass "${svc}: ${digest:0:26}… giống nhau ở cả hai lần build" \
+135      || fail "${svc}: run1=${digest} != run2=${d2}"
+136  done < /tmp/repro-run1.txt
+137  echo
+138  
+139  if [[ $FAILED -eq 0 ]]; then
+140    echo "OK — bộ image của commit ${GIT_SHA} tái lập được (cả 4 service)."
+141  else
+142    echo "CÓ LỖI — xem các dòng FAIL ở trên."
+143  fi
+144  exit $FAILED
 ```
 
 ### `scripts/build-images.sh`
