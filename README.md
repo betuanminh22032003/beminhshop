@@ -54,17 +54,47 @@ Health check: `GET /health` → `{"service":"<tên>","status":"ok"}`. Cart/order
 
 ## Docker — Catalog (milestone container)
 
-`Dockerfile` + `.dockerignore` ở **gốc repo** đóng gói service **Catalog** (đơn tầng). Build context là gốc vì Catalog tham chiếu `packages/Shop.Contracts`. Catalog đọc `PORT` **và** `CATALOG_DATABASE_URL` từ env lúc chạy và bind `0.0.0.0` (để reachable qua `-p`):
+`Dockerfile` (**đa tầng**) + `.dockerignore` ở **gốc repo** đóng gói service **Catalog**. Build context là gốc vì Catalog tham chiếu `packages/Shop.Contracts`. Catalog đọc `PORT` **và** `CATALOG_DATABASE_URL` từ env lúc chạy và bind `0.0.0.0` (để reachable qua `-p`):
 
 ```bash
-docker build -t starci-shop/catalog:dev .
+docker build -t starci-shop/catalog:slim .
 docker run -d --name catalog -p 3001:3001 \
   -e PORT=3001 -e CATALOG_DATABASE_URL=postgres://catalog-db:5432/catalog \
-  starci-shop/catalog:dev
+  starci-shop/catalog:slim
 curl -s http://localhost:3001/products   # {"items":[{"id":"sku-001",...}],"total":3}
 ```
 
-Đổi `-e PORT=4000 -p 4000:4000` cùng image đó → bind 4000 (cổng từ env, không cứng hóa); `docker logs catalog` in `[catalog] listening on :<port>`. Đơn tầng ở milestone này — thu nhỏ bằng multi-stage là task kế tiếp.
+Đổi `-e PORT=4000 -p 4000:4000` cùng image đó → bind 4000 (cổng từ env, không cứng hóa); `docker logs catalog` in `[catalog] listening on :<port>`.
+
+### Đa tầng — tại sao image thu nhỏ
+
+- **Tầng `build`** (`mcr.microsoft.com/dotnet/sdk:10.0`): restore + `dotnet publish -c Release -o /app/publish`. Toàn bộ toolchain build (SDK, compiler, NuGet cache, source `.cs`) **ở lại đây**, không đi tiếp.
+- **Tầng `runtime`** (`mcr.microsoft.com/dotnet/aspnet:10.0`): `COPY --from=build /app/publish ./` — chỉ tạo phẩm runtime. **Không có SDK**, `USER app` (uid ≠ 0, image aspnet sẵn có), `EXPOSE 3001`, `ENTRYPOINT ["dotnet","Catalog.dll"]` (tên dll chốt bằng `<AssemblyName>Catalog</AssemblyName>` trong `Catalog.csproj`).
+
+Bản **đơn tầng** cũ giữ lại ở `Dockerfile.single` để so kích thước — nó nhồi cả SDK vào image chạy:
+
+```bash
+docker build -f Dockerfile.single -t catalog:single .   # 1.25GB  (aspnet runtime + app + full SDK)
+docker build -t catalog:slim .                         #  340MB  (aspnet runtime + app)
+```
+
+Đo thật (Docker 29.2.1, .NET SDK 10.0.302 trong image build): **1.25GB → 340MB**, nhỏ hơn ~3.7×.
+
+Chứng minh tầng runtime KHÔNG có SDK và KHÔNG chạy root — `ENTRYPOINT` là exec-form nên phải `--entrypoint` để chạy lệnh khác:
+
+```bash
+docker run --rm --entrypoint sh catalog:slim -c "ls /usr/share/dotnet/sdk"
+# ls: cannot access '/usr/share/dotnet/sdk': No such file or directory   ← không có SDK
+docker run --rm --entrypoint id catalog:slim
+# uid=1654(app) gid=1654(app)   ← KHÁC 0, user "app" sẵn có của image aspnet
+
+# đối chứng bản đơn tầng:
+docker run --rm --entrypoint sh catalog:single -c "dotnet --list-sdks; id -u"
+# 10.0.302 [/usr/share/dotnet/sdk]
+# 0                                ← có SDK, và chạy root
+```
+
+`/app` trong image slim chỉ có tạo phẩm publish (`Catalog.dll`, `Shop.Contracts.dll`, `*.runtimeconfig.json`, `appsettings*.json`) — `find /app -name '*.cs' | wc -l` → `0`, không file source nào lọt lên production.
 
 ---
 
@@ -260,16 +290,48 @@ Toàn bộ nội dung thực, kèm số dòng, của các file quyết định �
 ### `services/Catalog/Catalog.csproj`
 
 ```xml
-1  <Project Sdk="Microsoft.NET.Sdk.Web">
-2
-3    <PropertyGroup>
-4      <TargetFramework>net10.0</TargetFramework>
-5      <Nullable>enable</Nullable>
-6      <ImplicitUsings>enable</ImplicitUsings>
-7    </PropertyGroup>
-8
-9  </Project>
+ 1  <Project Sdk="Microsoft.NET.Sdk.Web">
+ 2
+ 3    <PropertyGroup>
+ 4      <TargetFramework>net10.0</TargetFramework>
+ 5      <Nullable>enable</Nullable>
+ 6      <ImplicitUsings>enable</ImplicitUsings>
+ 7      <!-- Chốt tên assembly để output publish (Catalog.dll) khớp ENTRYPOINT của Dockerfile,
+ 8           không phụ thuộc casing thư mục (NTFS case-insensitive). -->
+ 9      <AssemblyName>Catalog</AssemblyName>
+10    </PropertyGroup>
+11
+12    <ItemGroup>
+13      <ProjectReference Include="..\..\packages\Shop.Contracts\Shop.Contracts.csproj" />
+14    </ItemGroup>
+15
+16  </Project>
 ```
+
+### `Dockerfile` (đa tầng — tầng build có SDK, tầng runtime KHÔNG)
+
+```dockerfile
+ 1  # --- tầng build: full .NET SDK, restore + publish ---
+ 2  FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+ 3  WORKDIR /src
+ 4  COPY packages/Shop.Contracts/Shop.Contracts.csproj packages/Shop.Contracts/
+ 5  COPY services/Catalog/Catalog.csproj services/Catalog/
+ 6  RUN dotnet restore services/Catalog/Catalog.csproj
+ 7  COPY packages/Shop.Contracts/ packages/Shop.Contracts/
+ 8  COPY services/Catalog/ services/Catalog/
+ 9  RUN dotnet publish services/Catalog/Catalog.csproj -c Release -o /app/publish --no-restore
+10
+11  # --- tầng runtime: CHỈ ASP.NET runtime, không SDK, không chạy root ---
+12  FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
+13  ENV DOTNET_RUNNING_IN_CONTAINER=true
+14  WORKDIR /app
+15  COPY --from=build /app/publish ./
+16  USER app
+17  EXPOSE 3001
+18  ENTRYPOINT ["dotnet", "Catalog.dll"]
+```
+
+(Comment tiếng Việt đầy đủ nằm trong file thật; trên đây rút gọn phần chú thích.)
 
 ### `services/Cart/Cart.csproj`
 

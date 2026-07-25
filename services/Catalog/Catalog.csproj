@@ -4,6 +4,9 @@
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
+    <!-- Chốt tên assembly để output publish (Catalog.dll) khớp ENTRYPOINT của Dockerfile,
+         không phụ thuộc casing thư mục (NTFS case-insensitive). -->
+    <AssemblyName>Catalog</AssemblyName>
   </PropertyGroup>
 
   <ItemGroup>

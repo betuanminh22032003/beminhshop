@@ -5,4 +5,5 @@
 .vs/
 .vscode/
 *.user
+*.log
 scripts/

@@ -9,7 +9,9 @@ starci-shop.slnx        # solution gốc — GỌI TÊN cả 4 service + Shop.Co
 README.md               # bản đồ service — ĐỌC TRƯỚC khi sửa bất kỳ service nào
 packages/
   Shop.Contracts/        # contract dùng chung: CHỈ record/enum thuần (Money, ProductId, OrderStatus), KHÔNG logic
-Dockerfile / .dockerignore  # đóng gói Catalog (đơn tầng, context=gốc) — milestone container
+Dockerfile              # đóng gói Catalog — ĐA TẦNG (sdk build → aspnet runtime, USER app), context=gốc
+Dockerfile.single       # bản đơn tầng cũ, GIỮ LẠI chỉ để so kích thước (SDK lên tận production)
+.dockerignore           # giữ build context gọn (bin/obj/.git/*.log/scripts)
 scripts/                 # dev.sh (dựng Catalog+Cart+order cùng lúc), health.csx (probe /health)
 services/
   Catalog/               # sản phẩm         (:5001 mặc định — đọc PORT/SERVICE_NAME/CATALOG_DATABASE_URL từ env, Dockerized)
@@ -44,8 +46,9 @@ dotnet script scripts/health.csx              # probe /health cả đội — OK
 dotnet build services/Catalog                 # build 1 service độc lập (chỉ kéo theo Shop.Contracts)
 dotnet run --project services/Catalog         # chạy Catalog (đọc PORT env, mặc định 5001)
 dotnet sln list                               # xác nhận đủ 5 project (4 service + Shop.Contracts)
-docker build -t starci-shop/catalog:dev .     # đóng gói Catalog (Dockerfile ở GỐC; context=gốc vì cần Shop.Contracts)
-docker run -d -p 3001:3001 -e PORT=3001 -e CATALOG_DATABASE_URL=... starci-shop/catalog:dev  # cổng+DB từ env
+docker build -t starci-shop/catalog:slim .    # đóng gói Catalog ĐA TẦNG (Dockerfile ở GỐC; context=gốc vì cần Shop.Contracts)
+docker build -f Dockerfile.single -t catalog:single .  # bản đơn tầng cũ — chỉ để so kích thước
+docker run -d -p 3001:3001 -e PORT=3001 -e CATALOG_DATABASE_URL=... starci-shop/catalog:slim  # cổng+DB từ env
 ```
 
 Chạy dotnet ở **gốc repo** khi build/thao tác solution. Cart/order chốt cổng trong `app.Run(...)` (5002/5003) + launchSettings; **Catalog đọc `PORT` từ env** (mặc định 5001, bind `0.0.0.0`, Dockerized); payment theo `launchSettings.json` (5004). `bash scripts/dev.sh` là lệnh gốc dựng cả ba; `dotnet script scripts/health.csx` là probe (cần `dotnet tool install -g dotnet-script`). **Windows:** trap của dev.sh (`kill ${pids[*]}`) chỉ hạ subshell, tiến trình `dotnet` cháu bị mồ côi vẫn giữ cổng — dọn bằng `taskkill //F //PID <pid>` (tìm qua `netstat -ano | grep :5001`).
