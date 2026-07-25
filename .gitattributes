@@ -1,3 +1,8 @@
 # Shell scripts phải giữ LF để chạy được dưới bash trên mọi nền tảng
 # (CRLF làm hỏng shebang -> bash báo lỗi $'\r').
 scripts/*.sh text eol=lf
+
+# Dockerfile giữ LF: build chạy trong container Linux, CRLF có thể làm hỏng
+# nối dòng `\` và tham số ENTRYPOINT/CMD.
+Dockerfile text eol=lf
+Dockerfile.* text eol=lf
