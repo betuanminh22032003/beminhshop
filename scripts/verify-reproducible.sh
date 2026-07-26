@@ -29,6 +29,14 @@ LOCKFILES=(
 GIT_SHA="$(git rev-parse --short HEAD)"
 FAILED=0
 
+if [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then
+  echo "error: working tree không sạch — không thể chứng minh image khớp commit ${GIT_SHA}" >&2
+  exit 1
+fi
+
+TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "$TMP_DIR"' EXIT
+
 pass() { echo "  PASS  $1"; }
 fail() { echo "  FAIL  $1"; FAILED=1; }
 
@@ -112,9 +120,9 @@ build_all() { # $1 = tên vòng, ghi config digest ra file $2
 }
 
 echo "=== Build lần 1 ==="
-build_all run1 /tmp/repro-run1.txt
+build_all run1 "$TMP_DIR/repro-run1.txt"
 echo "=== Build lần 2 (cùng commit) ==="
-build_all run2 /tmp/repro-run2.txt
+build_all run2 "$TMP_DIR/repro-run2.txt"
 echo
 
 echo "=== Label revision == git SHA (4/4 service) ==="
@@ -127,13 +135,28 @@ for svc in "${SERVICES[@]}"; do
 done
 echo
 
+echo "=== Runtime gọn + non-root (4/4 service) ==="
+for svc in "${SERVICES[@]}"; do
+  image="starci-shop/${svc}:${GIT_SHA}"
+  sdk_list="$(docker run --rm --entrypoint dotnet "$image" --list-sdks 2>/dev/null)"
+  [[ -z "$sdk_list" ]] \
+    && pass "${svc}: runtime không chứa .NET SDK" \
+    || fail "${svc}: runtime còn SDK (${sdk_list})"
+
+  uid="$(docker run --rm --entrypoint id "$image" -u 2>/dev/null)"
+  [[ -n "$uid" && "$uid" != "0" ]] \
+    && pass "${svc}: runtime uid=${uid} (non-root)" \
+    || fail "${svc}: runtime chạy root hoặc không đọc được uid"
+done
+echo
+
 echo "=== Hai lần build -> CÙNG image config digest (4/4 service) ==="
 while read -r svc digest; do
-  d2="$(grep "^${svc} " /tmp/repro-run2.txt | awk '{print $2}')"
+  d2="$(grep "^${svc} " "$TMP_DIR/repro-run2.txt" | awk '{print $2}')"
   [[ -n "$digest" && "$digest" == "$d2" ]] \
     && pass "${svc}: ${digest:0:26}… giống nhau ở cả hai lần build" \
     || fail "${svc}: run1=${digest} != run2=${d2}"
-done < /tmp/repro-run1.txt
+done < "$TMP_DIR/repro-run1.txt"
 echo
 
 if [[ $FAILED -eq 0 ]]; then

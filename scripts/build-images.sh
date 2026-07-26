@@ -24,13 +24,22 @@ if ! GIT_SHA="$(git rev-parse --short HEAD 2>/dev/null)"; then
   exit 1
 fi
 
-# Cây làm việc bẩn = image sẽ KHÔNG khớp commit được tag. Cảnh báo, không chặn (dev tiện).
-if ! git diff-index --quiet HEAD --; then
-  echo "warn: working tree có thay đổi chưa commit — image tag $GIT_SHA sẽ KHÔNG khớp commit đó" >&2
+# Cây làm việc bẩn = image sẽ KHÔNG khớp commit được tag. Phát hành phải fail,
+# không được gắn SHA của HEAD lên source chưa commit hoặc file untracked.
+if [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then
+  echo "error: working tree không sạch — từ chối gắn tag ${GIT_SHA} lên nội dung chưa commit" >&2
+  exit 1
 fi
 
 TAG_LATEST=0
-[[ "${1:-}" == "--latest" ]] && TAG_LATEST=1
+case "${1:-}" in
+  "") ;;
+  --latest) TAG_LATEST=1 ;;
+  *)
+    echo "usage: bash scripts/build-images.sh [--latest]" >&2
+    exit 2
+    ;;
+esac
 
 # Tên service -> Dockerfile. Cả bốn build với context = GỐC repo (Catalog/Cart/order
 # tham chiếu packages/Shop.Contracts; payment giữ cùng hợp đồng cho đồng nhất).

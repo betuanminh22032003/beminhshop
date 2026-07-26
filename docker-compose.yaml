@@ -33,13 +33,13 @@ services:
       start_period: 10s
 
   catalog:
+    image: starci-shop/catalog:${GIT_SHA:?set GIT_SHA to the current short commit SHA}
     build:
       context: .
       dockerfile: Dockerfile
       args:
-        # Compose là đường dev: image mang nhãn "dev" cho RÕ RÀNG, không giả một SHA.
-        # Artifact phát hành bất biến sinh bằng `bash scripts/build-images.sh` (tag = git SHA).
-        GIT_SHA: ${GIT_SHA:-dev}
+          # Không có fallback "dev": compose và release đều phải tự khai đúng commit.
+          GIT_SHA: ${GIT_SHA:?set GIT_SHA to the current short commit SHA}
     environment:
       PORT: 3001
       SERVICE_NAME: catalog
@@ -54,13 +54,13 @@ services:
       - shopnet
 
   cart:
+    image: starci-shop/cart:${GIT_SHA:?set GIT_SHA to the current short commit SHA}
     build:
       context: .
       dockerfile: services/Cart/Dockerfile
       args:
-        # Compose là đường dev: image mang nhãn "dev" cho RÕ RÀNG, không giả một SHA.
-        # Artifact phát hành bất biến sinh bằng `bash scripts/build-images.sh` (tag = git SHA).
-        GIT_SHA: ${GIT_SHA:-dev}
+          # Không có fallback "dev": compose và release đều phải tự khai đúng commit.
+          GIT_SHA: ${GIT_SHA:?set GIT_SHA to the current short commit SHA}
     environment:
       PORT: 3002
       SERVICE_NAME: cart
@@ -76,13 +76,13 @@ services:
       - shopnet
 
   order:
+    image: starci-shop/order:${GIT_SHA:?set GIT_SHA to the current short commit SHA}
     build:
       context: .
       dockerfile: services/order/Dockerfile
       args:
-        # Compose là đường dev: image mang nhãn "dev" cho RÕ RÀNG, không giả một SHA.
-        # Artifact phát hành bất biến sinh bằng `bash scripts/build-images.sh` (tag = git SHA).
-        GIT_SHA: ${GIT_SHA:-dev}
+          # Không có fallback "dev": compose và release đều phải tự khai đúng commit.
+          GIT_SHA: ${GIT_SHA:?set GIT_SHA to the current short commit SHA}
     environment:
       PORT: 3003
       SERVICE_NAME: order

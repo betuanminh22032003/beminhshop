@@ -23,6 +23,7 @@ RUN dotnet publish services/Cart/Cart.csproj -c Release -o /app/publish --no-res
 FROM mcr.microsoft.com/dotnet/aspnet:10.0@sha256:1f51d2d65ace46d6395e773fb4cfc1c74d36fb4f08e5cf996e7f6961b45e9283 AS runtime
 
 ARG GIT_SHA
+RUN test -n "${GIT_SHA}" || (echo "GIT_SHA build arg is required" >&2; exit 1)
 ENV APP_VERSION=${GIT_SHA} \
     DOTNET_RUNNING_IN_CONTAINER=true
 

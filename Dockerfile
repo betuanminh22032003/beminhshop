@@ -28,6 +28,7 @@ FROM mcr.microsoft.com/dotnet/aspnet:10.0@sha256:1f51d2d65ace46d6395e773fb4cfc1c
 # GIT_SHA tiêm lúc build, KHÔNG default về giá trị trôi nổi: build thiếu ARG thì version
 # rỗng và thấy ngay, thay vì gắn nhãn sai cho một image.
 ARG GIT_SHA
+RUN test -n "${GIT_SHA}" || (echo "GIT_SHA build arg is required" >&2; exit 1)
 ENV APP_VERSION=${GIT_SHA} \
     DOTNET_RUNNING_IN_CONTAINER=true
 

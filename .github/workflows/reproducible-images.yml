@@ -1,0 +1,32 @@
+name: Reproducible service images
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - Dockerfile
+      - docker-compose.yaml
+      - services/**/Dockerfile
+      - services/**/*.csproj
+      - services/**/packages.lock.json
+      - packages/**/*.csproj
+      - packages/**/packages.lock.json
+      - scripts/build-images.sh
+      - scripts/verify-reproducible.sh
+      - .github/workflows/reproducible-images.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build twice and verify the immutable bundle
+        shell: bash
+        run: |
+          set -o pipefail
+          bash scripts/verify-reproducible.sh | tee -a "$GITHUB_STEP_SUMMARY"
