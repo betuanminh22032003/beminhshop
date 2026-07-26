@@ -27,7 +27,7 @@ only as an explicit alias after the immutable SHA tag exists).
 
 `bash scripts/verify-reproducible.sh` is the executable proof. It builds all
 four images twice, verifies the second restore layers are `CACHED`, compares
-both image config digests, checks revision labels, confirms the runtime has no
+digests of the runtime config plus filesystem layers, checks revision labels, confirms the runtime has no
 SDK, confirms the runtime UID is non-root, and exits nonzero on any mismatch.
 The same command runs on every relevant push to `main` in
 `.github/workflows/reproducible-images.yml`, with its complete output written to

@@ -10,7 +10,7 @@
 #   4. Label org.opencontainers.image.revision == git SHA ngắn của HEAD.
 #   5. Không có dependency trôi nổi: dependency set khoá trong packages.lock.json đã commit
 #      (in ra sha256 của lockfile để so được giữa hai lần build / hai máy).
-#   6. Build lần hai cho ra CÙNG image config digest (functionally identical image).
+#   6. Build lần hai cho ra CÙNG digest của runtime config + filesystem layers.
 #
 # Dùng: bash scripts/verify-reproducible.sh
 set -uo pipefail
@@ -98,8 +98,8 @@ for i in "${!SERVICES[@]}"; do
 done
 echo
 
-# ---------- 4 + 6: build hai lần, so label và config digest ----------
-build_all() { # $1 = tên vòng, ghi config digest ra file $2
+# ---------- 4 + 6: build hai lần, so label và runtime-content digest ----------
+build_all() { # $1 = tên vòng, ghi runtime-content digest ra file $2
   local round="$1" out="$2"
   : > "$out"
   for i in "${!SERVICES[@]}"; do
@@ -108,8 +108,14 @@ build_all() { # $1 = tên vòng, ghi config digest ra file $2
     docker build --build-arg "GIT_SHA=${GIT_SHA}" \
       -t "starci-shop/${svc}:${GIT_SHA}" -f "$df" . >"$log" 2>&1 \
       || { fail "${svc}: docker build thất bại (${round})"; tail -5 "$log"; }
-    # config digest = danh tính NỘI DUNG image (khác .Id của manifest list, thứ mang timestamp attestation)
-    echo "${svc} $(grep -o 'exporting config sha256:[a-f0-9]*' "$log" | tail -1 | awk '{print $3}')" >> "$out"
+    # Hash trực tiếp runtime config + filesystem layers từ image đã load. Cách này ổn định
+    # trên cả Docker Desktop (containerd image store) lẫn GitHub runner, không phụ thuộc
+    # format log BuildKit hay manifest attestation có timestamp.
+    runtime_digest="$(
+      docker inspect --format '{{json .Config}}|{{json .RootFS.Layers}}' \
+        "starci-shop/${svc}:${GIT_SHA}" | sha256sum | awk '{print "sha256:" $1}'
+    )"
+    echo "${svc} ${runtime_digest}" >> "$out"
     if [[ "$round" == "run2" ]]; then
       grep -A1 'RUN dotnet restore' "$log" | grep -q CACHED \
         && pass "${svc}: layer restore CACHED ở lần build thứ hai" \
@@ -150,7 +156,7 @@ for svc in "${SERVICES[@]}"; do
 done
 echo
 
-echo "=== Hai lần build -> CÙNG image config digest (4/4 service) ==="
+echo "=== Hai lần build -> CÙNG runtime-content digest (4/4 service) ==="
 while read -r svc digest; do
   d2="$(grep "^${svc} " "$TMP_DIR/repro-run2.txt" | awk '{print $2}')"
   [[ -n "$digest" && "$digest" == "$d2" ]] \

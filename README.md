@@ -351,7 +351,7 @@ commit under test: 4683c5a
   PASS  order:   revision=4683c5a
   PASS  payment: revision=4683c5a
 
-=== Hai lần build -> CÙNG image config digest (4/4 service) ===
+=== Hai lần build -> CÙNG runtime-content digest (4/4 service) ===
   PASS  catalog: sha256:b335b348d192e7c97cd… giống nhau ở cả hai lần build
   PASS  cart:    sha256:df639e0af5b3c51cf06… giống nhau ở cả hai lần build
   PASS  order:   sha256:b7179fc0db667bb7b38… giống nhau ở cả hai lần build
@@ -360,7 +360,7 @@ commit under test: 4683c5a
 OK — bộ image của commit 4683c5a tái lập được (cả 4 service).
 ```
 
-Đó là bằng chứng trực tiếp cho "cùng commit ⇒ image functionally identical" **ở cả bốn service, payment bao gồm**: cùng label `revision`, cùng dependency set (lockfile đã commit, restore locked), cùng image config digest.
+Đó là bằng chứng trực tiếp cho "cùng commit ⇒ image functionally identical" **ở cả bốn service, payment bao gồm**: cùng label `revision`, cùng dependency set (lockfile đã commit, restore locked), cùng digest của runtime config + filesystem layers.
 
 ### Kiểm chứng chạy thật (Docker 29.2.1, commit `a4d865a`)
 
@@ -401,8 +401,8 @@ $ docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.rev
     starci-shop/catalog:$(git rev-parse --short HEAD)
 a4d865a
 
-# --- Hai lần build cho ra CÙNG image config digest ---
-$ # run 3 và run 4, so 'exporting config':
+# --- Hai lần build cho ra CÙNG runtime-content digest ---
+$ # run 3 và run 4, hash docker inspect .Config + .RootFS.Layers:
 run3: 54b558a5294e  56c5170b2eac  67b0ad8c2a8a  f2568b623924
 run4: 54b558a5294e  56c5170b2eac  67b0ad8c2a8a  f2568b623924   # GIỐNG HỆT
 
@@ -429,7 +429,7 @@ ERROR: process "/bin/sh -c dotnet restore services/order/order.csproj --locked-m
 
 Build **fail** thay vì âm thầm phát hành một image với cây NuGet khác. (csproj đã được phục hồi sau thử nghiệm.)
 
-> Trung thực về giới hạn: `docker inspect --format '{{.Id}}'` (digest của manifest **list**) đổi mỗi lần build vì buildx sinh attestation manifest mới kèm timestamp. Thứ quyết định nội dung container — **image config digest** — thì giống hệt qua các lần build, như bảng run3/run4 ở trên. Muốn `.Id` cũng bất biến thì phải tắt attestation (`--provenance=false --sbom=false`) hoặc set `SOURCE_DATE_EPOCH`; chưa làm vì task không yêu cầu.
+> Trung thực về giới hạn: `docker inspect --format '{{.Id}}'` có thể là digest của manifest **list** và đổi mỗi lần build vì buildx sinh attestation manifest mới kèm timestamp. Script không dựa vào giá trị đó; nó hash trực tiếp `.Config` + `.RootFS.Layers`, tức nội dung runtime quyết định hành vi container, rồi so hai lượt build.
 
 Compose vẫn là **đường dev**, nhưng không còn fallback `dev`: `scripts/compose-up.sh` lấy SHA ngắn từ một working tree sạch, truyền SHA đó vào tag và OCI label, rồi mới gọi Compose. Artifact phát hành vẫn sinh từ `scripts/build-images.sh`. Compose vẫn chỉ dựng `db + catalog + cart + order` như milestone trước — payment có image nhưng chưa vào compose vì chưa có phụ thuộc runtime nào cần nó.
 
